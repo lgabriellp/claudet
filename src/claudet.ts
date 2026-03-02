@@ -598,10 +598,6 @@ async function createWorktree(
     s.start('Installing dependencies...')
     runLoud('pnpm install', wtPath)
     s.stop('Dependencies installed.')
-
-    s.start('Generating Prisma client...')
-    runLoud('pnpm exec prisma generate', wtPath)
-    s.stop('Prisma client generated.')
   }
 
   // Create plan file and register
@@ -734,21 +730,38 @@ async function interactiveFlow(): Promise<void> {
     if (!existsSync(repoRoot)) bail(`Path does not exist: ${repoRoot}`)
     registerRepo(repoRoot)
     data = await autoSync(repoRoot)
-  } else if (repos.length === 1) {
-    repoRoot = repos[0]
-    p.log.step(`Repository: ${pc.cyan(basename(dirname(repoRoot)) + '/' + basename(repoRoot))}`)
-    data = await autoSync(repoRoot)
   } else {
+    const ADD_NEW = '__add_new__'
     const selected = await p.select({
       message: 'Select repository',
-      options: repos.map((r) => ({
-        value: r,
-        label: `${basename(dirname(r))}/${basename(r)}`,
-        hint: r,
-      })),
+      options: [
+        ...repos.map((r) => ({
+          value: r,
+          label: `${basename(dirname(r))}/${basename(r)}`,
+          hint: r,
+        })),
+        {
+          value: ADD_NEW,
+          label: pc.green('+ Add new repository'),
+          hint: '',
+        },
+      ],
     })
     if (cancelled(selected)) bail('Cancelled.')
-    repoRoot = selected as string
+
+    if (selected === ADD_NEW) {
+      const input = await p.text({
+        message: 'Enter path to git repository',
+        placeholder: '~/repos/my-project',
+        initialValue: process.cwd(),
+      })
+      if (cancelled(input)) bail('Cancelled.')
+      repoRoot = resolve((input as string).replace(/^~/, HOME))
+      if (!existsSync(repoRoot)) bail(`Path does not exist: ${repoRoot}`)
+      registerRepo(repoRoot)
+    } else {
+      repoRoot = selected as string
+    }
     data = await autoSync(repoRoot)
   }
 
