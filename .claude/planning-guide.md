@@ -17,9 +17,9 @@ Why this change is needed — the problem or opportunity.
 
 What will be done — deliverables and scope.
 
-## ClickUp Ticket
+## Ticket
 
-Link or ID (if applicable).
+Issue tracker ticket link or ID, prefixed with the tracker name (e.g., `ClickUp: ABC-123`, `Jira: PROJ-456`).
 
 ## Target Branch
 
