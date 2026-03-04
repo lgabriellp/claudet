@@ -1702,6 +1702,10 @@ switch (subcommand) {
         process.exit(1);
     }
     break;
+  case "--version":
+  case "-v":
+    console.log(PKG_VERSION);
+    break;
   case undefined:
     interactiveFlow().catch((err) => {
       console.error(err);
@@ -1718,6 +1722,7 @@ switch (subcommand) {
     claudet statusline       Output status line (reads JSON from stdin)
     claudet worklog start    Log session start (called by hook)
     claudet worklog tick     Log tick + update time (called by hook)
+    claudet --version        Show version
     claudet --help           Show this help
 `);
     process.exit(subcommand === "--help" || subcommand === "-h" ? 0 : 1);
