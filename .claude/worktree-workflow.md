@@ -51,9 +51,9 @@ Committable file in the repo root:
 
 ```jsonc
 {
-  "dataDir": "~/.claudet",        // optional, user-specific (gitignore or omit)
-  "defaultTarget": "dev",         // shared project setting
-  "setup": ["pnpm install"]       // custom post-worktree-creation commands
+  "dataDir": "~/.claudet", // optional, user-specific (gitignore or omit)
+  "defaultTarget": "dev", // shared project setting
+  "setup": ["pnpm install"], // custom post-worktree-creation commands
 }
 ```
 
@@ -76,6 +76,7 @@ When creating via `claudet`:
 4. **Create draft PR?** — Optional. Runs `gh pr create --draft`.
 
 The script:
+
 - Creates the git worktree at `~/.claudet/repos/<slug>/worktrees/<name>/`
 - Symlinks `.env*` files and `.claude/settings.local.json` from the main repo
 - Runs setup commands from `.claudet.json` `setup` array
@@ -110,6 +111,7 @@ ALL change requests must be documented in the Progress section of the plan file 
 ## Filesystem-wins Reconciliation
 
 On every interactive launch, `reconcileWorktrees(slug)` runs:
+
 1. **Scan `worktrees/` dir** — any subdirectory with a `.git` file is a live worktree. If missing from metadata, discover and add it.
 2. **Validate metadata** — if an active entry's directory is gone, mark `archivedAt`.
 3. **Cross-check `git worktree list`** — catch worktrees created outside claudet.
@@ -117,6 +119,7 @@ On every interactive launch, `reconcileWorktrees(slug)` runs:
 ## Cleaning Up
 
 `claudet clean` offers interactive multi-select of worktrees to archive:
+
 - Removes the git worktree directory
 - Sets `archivedAt` timestamp in `worktrees.json`
 - Plan file is preserved for history

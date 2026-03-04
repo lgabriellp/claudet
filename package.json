@@ -1,6 +1,6 @@
 {
   "name": "claudet",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Interactive worktree manager + Claude launcher",
   "type": "module",
   "bin": {
