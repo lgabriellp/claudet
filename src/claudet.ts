@@ -1,16 +1,17 @@
 import { execSync, spawn } from "child_process";
 import {
   appendFileSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
-  writeFileSync,
   readdirSync,
+  renameSync,
   statSync,
   symlinkSync,
-  renameSync,
+  writeFileSync,
 } from "fs";
-import { resolve, dirname, basename, join } from "path";
+import { basename, dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import * as p from "@clack/prompts";
 import pc from "picocolors";
@@ -27,15 +28,13 @@ const PKG_VERSION: string = JSON.parse(
 ).version;
 
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
-const REPOS_FILE = resolve(HOME, ".claude", "repos.json");
-const GLOBAL_WORKTREES_FILE = resolve(HOME, ".claude", "worktrees.json");
-const PLANS_DIR = resolve(HOME, ".claude", "plans");
-const WORKLOG_FILE = resolve(HOME, ".claude", "worklog.jsonl");
 const GLOBAL_SETTINGS_FILE = resolve(HOME, ".claude", "settings.json");
 
-function worktreesFilePath(repoRoot: string): string {
-  return resolve(repoRoot, ".claude", "worktrees.json");
-}
+// Legacy paths (for migration)
+const LEGACY_REPOS_FILE = resolve(HOME, ".claude", "repos.json");
+const LEGACY_PLANS_DIR = resolve(HOME, ".claude", "plans");
+const LEGACY_WORKLOG_FILE = resolve(HOME, ".claude", "worklog.jsonl");
+const LEGACY_GLOBAL_WORKTREES_FILE = resolve(HOME, ".claude", "worktrees.json");
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -54,9 +53,9 @@ function cancelled(value: unknown): value is symbol {
   return p.isCancel(value);
 }
 
-function tryReadFileSync(path: string, fallback = ""): string {
+function tryReadFileSync(filePath: string, fallback = ""): string {
   try {
-    return readFileSync(path, "utf-8");
+    return readFileSync(filePath, "utf-8");
   } catch {
     return fallback;
   }
@@ -70,6 +69,10 @@ function tryParseJson<T>(str: string, fallback: T): T {
   }
 }
 
+function expandHome(input: string): string {
+  return input.replace(/^~(?=$|\/)/, HOME);
+}
+
 function toMergeableStatus(
   m: boolean | null | undefined,
 ): PRStatus["mergeable"] {
@@ -78,43 +81,188 @@ function toMergeableStatus(
   return "UNKNOWN";
 }
 
-async function pickRepo(repos: string[]): Promise<string> {
-  if (repos.length === 1) {
-    p.log.step(
-      `Repository: ${pc.cyan(basename(dirname(repos[0])) + "/" + basename(repos[0]))}`,
-    );
-    return repos[0];
-  }
-  const selected = await p.select({
-    message: "Select repository",
-    options: repos.map((r) => ({
-      value: r,
-      label: `${basename(dirname(r))}/${basename(r)}`,
-      hint: r,
-    })),
-  });
-  if (cancelled(selected)) bail("Cancelled.");
-  return selected as string;
+// ---------------------------------------------------------------------------
+// Configuration & path resolution
+// ---------------------------------------------------------------------------
+
+interface ProjectConfig {
+  dataDir?: string;
+  defaultTarget?: string;
+  setup?: string[];
 }
 
-function findWorktreeForCwd(
-  cwd: string,
-  repos: string[],
-): { name: string; branch?: string } | null {
-  for (const repoRoot of repos) {
-    const filePath = worktreesFilePath(repoRoot);
-    if (!existsSync(filePath)) continue;
-    const data: WorktreesData = tryParseJson(tryReadFileSync(filePath), {
-      worktrees: {},
-    });
-    for (const [name, entry] of Object.entries(data.worktrees)) {
-      if (entry.archivedAt) continue;
-      if (cwd.startsWith(entry.path)) {
-        return { name, branch: entry.branch };
-      }
+function loadProjectConfig(repoRoot: string): ProjectConfig {
+  const configPath = resolve(repoRoot, ".claudet.json");
+  if (!existsSync(configPath)) return {};
+  return tryParseJson<ProjectConfig>(tryReadFileSync(configPath), {});
+}
+
+function resolveDataDir(repoRoot?: string): string {
+  // 1. Env var (always wins)
+  if (process.env.CLAUDET_DATA_DIR) {
+    return resolve(expandHome(process.env.CLAUDET_DATA_DIR));
+  }
+
+  // 2. Repo-level .claudet.json
+  if (repoRoot) {
+    const config = loadProjectConfig(repoRoot);
+    if (config.dataDir) {
+      return resolve(expandHome(config.dataDir));
     }
   }
-  return null;
+
+  // 3. Global config
+  const globalConfigPath = resolve(HOME, ".config", "claudet", "config.json");
+  if (existsSync(globalConfigPath)) {
+    const config = tryParseJson<{ dataDir?: string }>(
+      tryReadFileSync(globalConfigPath),
+      {},
+    );
+    if (config.dataDir) {
+      return resolve(expandHome(config.dataDir));
+    }
+  }
+
+  // 4. Default
+  return resolve(HOME, ".claudet");
+}
+
+// ---------------------------------------------------------------------------
+// Path derivation
+// ---------------------------------------------------------------------------
+
+function deriveRepoSlug(repoRoot: string): string {
+  return `${basename(dirname(repoRoot))}--${basename(repoRoot)}`;
+}
+
+function repoDir(dataDir: string, slug: string): string {
+  return resolve(dataDir, "repos", slug);
+}
+
+function worktreesJsonPath(dataDir: string, slug: string): string {
+  return resolve(dataDir, "repos", slug, "worktrees.json");
+}
+
+function metaJsonPath(dataDir: string, slug: string): string {
+  return resolve(dataDir, "repos", slug, "meta.json");
+}
+
+function plansDirPath(dataDir: string, slug: string): string {
+  return resolve(dataDir, "repos", slug, "plans");
+}
+
+function planFilePath(dataDir: string, slug: string, name: string): string {
+  return resolve(dataDir, "repos", slug, "plans", `${name}.md`);
+}
+
+function wtDirPath(dataDir: string, slug: string, name: string): string {
+  return resolve(dataDir, "repos", slug, "worktrees", name);
+}
+
+function worklogPath(dataDir: string): string {
+  return resolve(dataDir, "worklog.jsonl");
+}
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+interface WorktreeEntry {
+  branch: string;
+  target: string;
+  archivedAt: string | null;
+}
+
+interface WorktreesData {
+  worktrees: Record<string, WorktreeEntry>;
+}
+
+interface RepoMeta {
+  repoRoot: string;
+  registeredAt: string;
+}
+
+interface PRStatus {
+  state: "OPEN" | "MERGED" | "CLOSED";
+  url: string;
+  number: number;
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+}
+
+interface RepoInfo {
+  owner: string;
+  repo: string;
+}
+
+// ---------------------------------------------------------------------------
+// Repo registry (directory-based)
+// ---------------------------------------------------------------------------
+
+function loadRepoSlugs(dataDir: string): string[] {
+  const reposDir = resolve(dataDir, "repos");
+  if (!existsSync(reposDir)) return [];
+  return readdirSync(reposDir).filter((entry) => {
+    const entryPath = resolve(reposDir, entry);
+    return (
+      statSync(entryPath).isDirectory() &&
+      existsSync(metaJsonPath(dataDir, entry))
+    );
+  });
+}
+
+function loadRepoMeta(dataDir: string, slug: string): RepoMeta | null {
+  const mPath = metaJsonPath(dataDir, slug);
+  if (!existsSync(mPath)) return null;
+  return tryParseJson<RepoMeta | null>(tryReadFileSync(mPath), null);
+}
+
+function getRepoRoot(dataDir: string, slug: string): string | null {
+  return loadRepoMeta(dataDir, slug)?.repoRoot ?? null;
+}
+
+function registerRepo(dataDir: string, repoRoot: string): string {
+  const slug = deriveRepoSlug(repoRoot);
+  const dir = repoDir(dataDir, slug);
+
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+    mkdirSync(resolve(dir, "plans"), { recursive: true });
+    mkdirSync(resolve(dir, "worktrees"), { recursive: true });
+  }
+
+  const mPath = metaJsonPath(dataDir, slug);
+  if (!existsSync(mPath)) {
+    const meta: RepoMeta = {
+      repoRoot,
+      registeredAt: new Date().toISOString(),
+    };
+    writeFileSync(mPath, JSON.stringify(meta, null, 2) + "\n");
+  }
+
+  return slug;
+}
+
+// ---------------------------------------------------------------------------
+// Worktrees.json management
+// ---------------------------------------------------------------------------
+
+function loadWorktrees(dataDir: string, slug: string): WorktreesData {
+  const wtPath = worktreesJsonPath(dataDir, slug);
+  if (!existsSync(wtPath)) return { worktrees: {} };
+  return tryParseJson<WorktreesData>(tryReadFileSync(wtPath), {
+    worktrees: {},
+  });
+}
+
+function saveWorktrees(
+  dataDir: string,
+  slug: string,
+  data: WorktreesData,
+): void {
+  const wtPath = worktreesJsonPath(dataDir, slug);
+  const dir = dirname(wtPath);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(wtPath, JSON.stringify(data, null, 2) + "\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -127,7 +275,6 @@ function git(cwd: string): SimpleGit {
 
 function resolveGitHubToken(): string | null {
   if (process.env.GITHUB_TOKEN) return process.env.GITHUB_TOKEN;
-
   const hostsPath = join(HOME, ".config", "gh", "hosts.yml");
   try {
     const content = readFileSync(hostsPath, "utf-8");
@@ -181,140 +328,24 @@ function prBadge(pr: PRStatus | null): string {
 }
 
 // ---------------------------------------------------------------------------
-// worktrees.json management
-// ---------------------------------------------------------------------------
-
-interface WorktreeEntry {
-  branch: string;
-  target: string;
-  path: string;
-  repo: string;
-  planPath: string;
-  archivedAt: string | null;
-}
-
-interface WorktreesData {
-  worktrees: Record<string, WorktreeEntry>;
-}
-
-interface PRStatus {
-  state: "OPEN" | "MERGED" | "CLOSED";
-  url: string;
-  number: number;
-  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
-}
-
-interface RepoInfo {
-  owner: string;
-  repo: string;
-}
-
-// ---------------------------------------------------------------------------
-// Repo registry (repos.json)
-// ---------------------------------------------------------------------------
-
-function loadRepos(): string[] {
-  if (!existsSync(REPOS_FILE)) return [];
-  try {
-    return JSON.parse(readFileSync(REPOS_FILE, "utf-8"));
-  } catch {
-    return [];
-  }
-}
-
-function saveRepos(repos: string[]): void {
-  const dir = dirname(REPOS_FILE);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(REPOS_FILE, JSON.stringify(repos, null, 2) + "\n");
-}
-
-function registerRepo(repoRoot: string): void {
-  const repos = loadRepos();
-  if (!repos.includes(repoRoot)) {
-    repos.push(repoRoot);
-    saveRepos(repos);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// One-time migration from global worktrees.json
-// ---------------------------------------------------------------------------
-
-function migrateGlobalWorktrees(): void {
-  if (!existsSync(GLOBAL_WORKTREES_FILE)) return;
-
-  const globalData = tryParseJson<WorktreesData | null>(
-    tryReadFileSync(GLOBAL_WORKTREES_FILE),
-    null,
-  );
-  if (!globalData) return;
-
-  // Group entries by repo
-  const byRepo = new Map<string, Record<string, WorktreeEntry>>();
-  for (const [name, entry] of Object.entries(globalData.worktrees)) {
-    if (!entry.repo) continue;
-    if (!byRepo.has(entry.repo)) byRepo.set(entry.repo, {});
-    byRepo.get(entry.repo)![name] = entry;
-  }
-
-  // Write each group to <repoRoot>/.claude/worktrees.json (merge with existing)
-  for (const [repoRoot, entries] of byRepo) {
-    const filePath = worktreesFilePath(repoRoot);
-    const existing: WorktreesData = tryParseJson(tryReadFileSync(filePath), {
-      worktrees: {},
-    });
-    for (const [name, entry] of Object.entries(entries)) {
-      if (!existing.worktrees[name]) {
-        existing.worktrees[name] = entry;
-      }
-    }
-    const dir = dirname(filePath);
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(filePath, JSON.stringify(existing, null, 2) + "\n");
-    registerRepo(repoRoot);
-  }
-
-  // Rename global file to .migrated
-  renameSync(GLOBAL_WORKTREES_FILE, GLOBAL_WORKTREES_FILE + ".migrated");
-}
-
-// ---------------------------------------------------------------------------
-// Per-repo worktrees.json management
-// ---------------------------------------------------------------------------
-
-function loadWorktrees(repoRoot: string): WorktreesData {
-  const filePath = worktreesFilePath(repoRoot);
-  if (!existsSync(filePath)) {
-    return { worktrees: {} };
-  }
-  return JSON.parse(readFileSync(filePath, "utf-8"));
-}
-
-function saveWorktrees(repoRoot: string, data: WorktreesData): void {
-  const filePath = worktreesFilePath(repoRoot);
-  const dir = dirname(filePath);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(filePath, JSON.stringify(data, null, 2) + "\n");
-}
-
-// ---------------------------------------------------------------------------
 // Plan file management
 // ---------------------------------------------------------------------------
 
 function createPlanFile(
+  dataDir: string,
+  slug: string,
   name: string,
-  entry: Partial<WorktreeEntry> & { ticket?: string; repo?: string },
+  entry: Partial<WorktreeEntry> & { ticket?: string },
 ): string {
-  const planPath = resolve(PLANS_DIR, `${name}.md`);
-  if (!existsSync(PLANS_DIR)) mkdirSync(PLANS_DIR, { recursive: true });
+  const pPath = planFilePath(dataDir, slug, name);
+  const pDir = plansDirPath(dataDir, slug);
+  if (!existsSync(pDir)) mkdirSync(pDir, { recursive: true });
 
-  if (!existsSync(planPath)) {
+  if (!existsSync(pPath)) {
     const now = new Date();
     const date = now.toISOString().split("T")[0];
     const time = now.toTimeString().slice(0, 5);
-    const ticketSection = entry.ticket
-      ? `\n## Ticket\n${entry.ticket}\n`
-      : "";
+    const ticketSection = entry.ticket ? `\n## Ticket\n${entry.ticket}\n` : "";
     const content = `# ${name}
 
 ## Context
@@ -343,16 +374,34 @@ pending
 <!-- ALL change requests must be logged here, even when requested outside Claude plan mode. -->
 - ${date} ${time}: Created worktree, started planning
 `;
-    writeFileSync(planPath, content);
+    writeFileSync(pPath, content);
 
-    appendWorklog({
+    appendWorklog(dataDir, {
       event: "plan_created",
       timestamp: Date.now(),
       plan: name,
     });
   }
 
-  return planPath;
+  return pPath;
+}
+
+function getStatusFromPlan(pPath: string): string {
+  if (!existsSync(pPath)) return "unknown";
+  const content = readFileSync(pPath, "utf-8");
+  const match = content.match(/^## Status\s*\n([^\n#]+)/m);
+  return match ? match[1].trim() : "unknown";
+}
+
+function getLastProgress(pPath: string): string | null {
+  if (!existsSync(pPath)) return null;
+  const content = readFileSync(pPath, "utf-8");
+  const progressSection = content.split("## Progress")[1];
+  if (!progressSection) return null;
+  const lines = progressSection
+    .split("\n")
+    .filter((l) => l.startsWith("- ") && !l.startsWith("<!-- "));
+  return lines.length > 0 ? lines[lines.length - 1].replace(/^- /, "") : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -434,13 +483,11 @@ async function fetchPRStatuses(
     return result;
   }
 
-  // Build branch → worktree name lookup
   const branchToName = new Map<string, string>();
   for (const [name, entry] of entries) {
     branchToName.set(entry.branch, name);
   }
 
-  // Bulk fetch recent PRs (most recent 100 covers all active branches)
   onPhase?.("Fetching PRs…");
   const allPRs = await octokit.rest.pulls
     .list({
@@ -459,7 +506,6 @@ async function fetchPRStatuses(
     return result;
   }
 
-  // Match PRs to worktree branches (take first match = most recent)
   const matched = new Map<string, (typeof allPRs)[number]>();
   for (const pr of allPRs) {
     const wtName = branchToName.get(pr.head.ref);
@@ -468,7 +514,6 @@ async function fetchPRStatuses(
     }
   }
 
-  // For open PRs, fetch mergeable status in parallel
   const openPRs = [...matched.entries()].filter(
     ([, pr]) => pr.state === "open",
   );
@@ -494,80 +539,562 @@ async function fetchPRStatuses(
     mergeableMap.set(name, mergeable);
   }
 
-  // Build final result
   for (const [name] of entries) {
     const pr = matched.get(name);
     if (!pr) {
       result.set(name, null);
       continue;
     }
-
     const state: PRStatus["state"] = pr.merged_at
       ? "MERGED"
       : pr.state === "open"
         ? "OPEN"
         : "CLOSED";
-
     const mergeable = toMergeableStatus(mergeableMap.get(name));
-
-    result.set(name, { state, url: pr.html_url, number: pr.number, mergeable });
+    result.set(name, {
+      state,
+      url: pr.html_url,
+      number: pr.number,
+      mergeable,
+    });
   }
 
   return result;
 }
 
 // ---------------------------------------------------------------------------
-// Auto-sync: seed worktrees.json from git worktree list
+// Worklog helpers
 // ---------------------------------------------------------------------------
 
-async function autoSync(repoRoot: string): Promise<WorktreesData> {
-  const s = p.spinner();
-  s.start("Loading worktrees...");
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+  if (minutes > 0) return `${minutes}m`;
+  return `${seconds}s`;
+}
 
-  registerRepo(repoRoot);
-  const data = loadWorktrees(repoRoot);
-  const output = await git(repoRoot).raw("worktree", "list", "--porcelain");
-  const entries = output.split("\n\n").filter((e) => e.trim());
-  const countBefore = Object.keys(data.worktrees).length;
+function parseDuration(str: string): number {
+  let ms = 0;
+  const hourMatch = str.match(/(\d+)h/);
+  const minMatch = str.match(/(\d+)m/);
+  const secMatch = str.match(/(\d+)s/);
+  if (hourMatch) ms += parseInt(hourMatch[1], 10) * 3600000;
+  if (minMatch) ms += parseInt(minMatch[1], 10) * 60000;
+  if (secMatch) ms += parseInt(secMatch[1], 10) * 1000;
+  return ms;
+}
 
-  for (const entry of entries) {
-    const lines = entry.split("\n");
-    const wtLine = lines.find((l) => l.startsWith("worktree "));
-    const branchLine = lines.find((l) => l.startsWith("branch "));
-    if (!wtLine || !branchLine) continue;
+function appendWorklog(dataDir: string, event: Record<string, unknown>): void {
+  const wlPath = worklogPath(dataDir);
+  const dir = dirname(wlPath);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  appendFileSync(wlPath, JSON.stringify(event) + "\n");
+}
 
-    const path = wtLine.replace("worktree ", "");
-    const branch = branchLine.replace("branch refs/heads/", "");
+function sessionStatePath(sessionId: string): string {
+  return join("/tmp", `claudet-worklog-${sessionId}.json`);
+}
 
-    if (path === repoRoot) continue;
+function updatePlanTimeTracked(pPath: string, addMs: number): void {
+  if (!existsSync(pPath)) return;
+  const content = readFileSync(pPath, "utf-8");
 
-    const shortName = basename(path);
-    if (isSmokeTestWorktree(shortName)) continue;
-    if (data.worktrees[shortName]) continue;
-
-    const planPath = createPlanFile(shortName, { target: "dev", branch, repo: repoRoot });
-
-    data.worktrees[shortName] = {
-      branch,
-      target: "dev",
-      path,
-      repo: repoRoot,
-      planPath,
-      archivedAt: null,
-    };
+  const timeMatch = content.match(/^## Time Tracked\s*\n([^\n#]*)/m);
+  let existingMs = 0;
+  if (timeMatch) {
+    existingMs = parseDuration(timeMatch[1].trim());
   }
 
-  const synced = Object.keys(data.worktrees).length - countBefore;
+  const totalMs = existingMs + addMs;
+  const formatted = formatDuration(totalMs);
 
-  saveWorktrees(repoRoot, data);
-
-  if (synced > 0) {
-    s.stop(`Loaded worktrees (synced ${synced} new).`);
+  if (timeMatch) {
+    const updated = content.replace(
+      /^(## Time Tracked\s*\n)[^\n#]*/m,
+      `$1${formatted}`,
+    );
+    writeFileSync(pPath, updated);
   } else {
-    s.stop("Worktrees loaded.");
+    const updated = content.replace(
+      /^(## Status\s*\n[^\n#]*\n)/m,
+      `$1\n## Time Tracked\n${formatted}\n`,
+    );
+    writeFileSync(pPath, updated);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Reconcile worktrees (filesystem wins)
+// ---------------------------------------------------------------------------
+
+async function reconcileWorktrees(
+  dataDir: string,
+  slug: string,
+  repoRoot: string,
+): Promise<WorktreesData> {
+  const data = loadWorktrees(dataDir, slug);
+  const wtBaseDir = resolve(dataDir, "repos", slug, "worktrees");
+  let changed = false;
+
+  // 1. Scan filesystem — discover worktrees not in metadata
+  if (existsSync(wtBaseDir)) {
+    for (const entry of readdirSync(wtBaseDir)) {
+      const dirPath = resolve(wtBaseDir, entry);
+      if (!statSync(dirPath).isDirectory()) continue;
+      if (!existsSync(resolve(dirPath, ".git"))) continue;
+      if (isSmokeTestWorktree(entry)) continue;
+      if (data.worktrees[entry] && !data.worktrees[entry].archivedAt) continue;
+
+      // Discover branch from git
+      let branch = entry;
+      try {
+        branch = execSync("git symbolic-ref --short HEAD", {
+          cwd: dirPath,
+          encoding: "utf-8",
+        }).trim();
+      } catch {
+        // fall back to entry name
+      }
+
+      data.worktrees[entry] = { branch, target: "dev", archivedAt: null };
+      createPlanFile(dataDir, slug, entry, { target: "dev", branch });
+      changed = true;
+    }
+  }
+
+  // 2. Validate metadata — mark gone entries as archived
+  for (const [name, entry] of Object.entries(data.worktrees)) {
+    if (entry.archivedAt) continue;
+    const dirPath = wtDirPath(dataDir, slug, name);
+    if (!existsSync(dirPath)) {
+      data.worktrees[name] = {
+        ...entry,
+        archivedAt: new Date().toISOString(),
+      };
+      changed = true;
+    }
+  }
+
+  // 3. Cross-check git worktree list — discover worktrees created via git
+  try {
+    const output = await git(repoRoot).raw("worktree", "list", "--porcelain");
+    const gitEntries = output.split("\n\n").filter((e) => e.trim());
+    for (const gitEntry of gitEntries) {
+      const lines = gitEntry.split("\n");
+      const wtLine = lines.find((l) => l.startsWith("worktree "));
+      const branchLine = lines.find((l) => l.startsWith("branch "));
+      if (!wtLine || !branchLine) continue;
+
+      const wtPath = wtLine.replace("worktree ", "");
+      if (wtPath === repoRoot) continue;
+
+      // Only care about worktrees under our managed directory
+      if (!wtPath.startsWith(wtBaseDir)) continue;
+
+      const name = basename(wtPath);
+      if (isSmokeTestWorktree(name)) continue;
+      if (data.worktrees[name] && !data.worktrees[name].archivedAt) continue;
+
+      const branch = branchLine.replace("branch refs/heads/", "");
+      data.worktrees[name] = { branch, target: "dev", archivedAt: null };
+      createPlanFile(dataDir, slug, name, { target: "dev", branch });
+      changed = true;
+    }
+  } catch {
+    // git worktree list failed — skip cross-check
+  }
+
+  if (changed) {
+    saveWorktrees(dataDir, slug, data);
   }
 
   return data;
+}
+
+// ---------------------------------------------------------------------------
+// Migration from old layout
+// ---------------------------------------------------------------------------
+
+interface LegacyWorktreeEntry {
+  branch: string;
+  target: string;
+  path: string;
+  repo: string;
+  planPath: string;
+  archivedAt: string | null;
+}
+
+interface LegacyWorktreesData {
+  worktrees: Record<string, LegacyWorktreeEntry>;
+}
+
+function migrateToConsolidatedDir(dataDir: string): void {
+  const markerPath = resolve(dataDir, ".migrated");
+  if (existsSync(markerPath)) return;
+
+  const hasLegacyRepos = existsSync(LEGACY_REPOS_FILE);
+  const hasLegacyGlobalWT = existsSync(LEGACY_GLOBAL_WORKTREES_FILE);
+  const hasLegacyWorklog = existsSync(LEGACY_WORKLOG_FILE);
+  const hasLegacyPlans = existsSync(LEGACY_PLANS_DIR);
+
+  if (!hasLegacyRepos && !hasLegacyGlobalWT) {
+    // Nothing to migrate — just create the marker
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(markerPath, new Date().toISOString() + "\n");
+    return;
+  }
+
+  mkdirSync(dataDir, { recursive: true });
+
+  // Handle old global worktrees.json (even-older migration path)
+  if (hasLegacyGlobalWT) {
+    const globalData = tryParseJson<LegacyWorktreesData | null>(
+      tryReadFileSync(LEGACY_GLOBAL_WORKTREES_FILE),
+      null,
+    );
+    if (globalData) {
+      // Group by repo → will be handled below via per-repo migration
+      const byRepo = new Map<string, Record<string, LegacyWorktreeEntry>>();
+      for (const [name, entry] of Object.entries(globalData.worktrees)) {
+        if (!entry.repo) continue;
+        if (!byRepo.has(entry.repo)) byRepo.set(entry.repo, {});
+        byRepo.get(entry.repo)![name] = entry;
+      }
+
+      // Write temporary per-repo files so the main loop picks them up
+      for (const [repoRoot, entries] of byRepo) {
+        const oldWtPath = resolve(repoRoot, ".claude", "worktrees.json");
+        if (!existsSync(oldWtPath)) {
+          const dir = dirname(oldWtPath);
+          if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+          const data: LegacyWorktreesData = { worktrees: entries };
+          writeFileSync(oldWtPath, JSON.stringify(data, null, 2) + "\n");
+        }
+      }
+    }
+    renameSync(
+      LEGACY_GLOBAL_WORKTREES_FILE,
+      LEGACY_GLOBAL_WORKTREES_FILE + ".migrated-to-claudet",
+    );
+  }
+
+  // Read legacy repos
+  let legacyRepos: string[] = [];
+  if (hasLegacyRepos) {
+    legacyRepos = tryParseJson<string[]>(
+      tryReadFileSync(LEGACY_REPOS_FILE),
+      [],
+    );
+  }
+
+  // For each repo, migrate worktrees and plans
+  for (const repoRoot of legacyRepos) {
+    if (!existsSync(repoRoot)) continue;
+
+    const slug = registerRepo(dataDir, repoRoot);
+
+    // Read old per-repo worktrees.json
+    const oldWtPath = resolve(repoRoot, ".claude", "worktrees.json");
+    if (existsSync(oldWtPath)) {
+      const oldData = tryParseJson<LegacyWorktreesData>(
+        tryReadFileSync(oldWtPath),
+        { worktrees: {} },
+      );
+      const newData = loadWorktrees(dataDir, slug);
+
+      for (const [name, entry] of Object.entries(oldData.worktrees)) {
+        newData.worktrees[name] = {
+          branch: entry.branch,
+          target: entry.target,
+          archivedAt: entry.archivedAt,
+        };
+
+        // Copy plan file if it exists
+        if (entry.planPath && existsSync(entry.planPath)) {
+          const destPlan = planFilePath(dataDir, slug, name);
+          if (!existsSync(destPlan)) {
+            const destDir = dirname(destPlan);
+            if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true });
+            copyFileSync(entry.planPath, destPlan);
+          }
+        }
+
+        // Move worktree dir if active and exists at old location
+        if (!entry.archivedAt && entry.path && existsSync(entry.path)) {
+          const newWtPath = wtDirPath(dataDir, slug, name);
+          if (!existsSync(newWtPath)) {
+            try {
+              const wtParent = dirname(newWtPath);
+              if (!existsSync(wtParent))
+                mkdirSync(wtParent, { recursive: true });
+              execSync(
+                `git worktree move ${JSON.stringify(entry.path)} ${JSON.stringify(newWtPath)}`,
+                { cwd: repoRoot, stdio: "pipe" },
+              );
+            } catch {
+              // If git worktree move fails, skip — user can handle manually
+            }
+          }
+        }
+      }
+
+      saveWorktrees(dataDir, slug, newData);
+      renameSync(oldWtPath, oldWtPath + ".migrated-to-claudet");
+    }
+
+    // Copy plan files from legacy plans dir that match worktree names
+    if (hasLegacyPlans) {
+      const data = loadWorktrees(dataDir, slug);
+      for (const name of Object.keys(data.worktrees)) {
+        const oldPlan = resolve(LEGACY_PLANS_DIR, `${name}.md`);
+        const newPlan = planFilePath(dataDir, slug, name);
+        if (existsSync(oldPlan) && !existsSync(newPlan)) {
+          const destDir = dirname(newPlan);
+          if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true });
+          copyFileSync(oldPlan, newPlan);
+        }
+      }
+    }
+  }
+
+  // Copy worklog.jsonl
+  if (hasLegacyWorklog) {
+    const newWorklog = worklogPath(dataDir);
+    if (!existsSync(newWorklog)) {
+      copyFileSync(LEGACY_WORKLOG_FILE, newWorklog);
+    }
+    renameSync(
+      LEGACY_WORKLOG_FILE,
+      LEGACY_WORKLOG_FILE + ".migrated-to-claudet",
+    );
+  }
+
+  // Rename legacy repos file
+  if (hasLegacyRepos) {
+    renameSync(LEGACY_REPOS_FILE, LEGACY_REPOS_FILE + ".migrated-to-claudet");
+  }
+
+  // Rename legacy plans dir
+  if (hasLegacyPlans) {
+    renameSync(LEGACY_PLANS_DIR, LEGACY_PLANS_DIR + ".migrated-to-claudet");
+  }
+
+  writeFileSync(markerPath, new Date().toISOString() + "\n");
+}
+
+// ---------------------------------------------------------------------------
+// Worklog hook handlers
+// ---------------------------------------------------------------------------
+
+function findWorktreeForCwd(
+  cwd: string,
+  dataDir: string,
+): { slug: string; name: string; branch?: string } | null {
+  for (const slug of loadRepoSlugs(dataDir)) {
+    const data = loadWorktrees(dataDir, slug);
+    for (const [name, entry] of Object.entries(data.worktrees)) {
+      if (entry.archivedAt) continue;
+      const dirPath = wtDirPath(dataDir, slug, name);
+      if (cwd.startsWith(dirPath)) {
+        return { slug, name, branch: entry.branch };
+      }
+    }
+  }
+  return null;
+}
+
+async function worklogStart(): Promise<void> {
+  const inputRaw = tryReadFileSync("/dev/stdin");
+  const input: any = tryParseJson(inputRaw, {});
+
+  const sessionId: string | undefined = input.session_id;
+  const cwd: string | undefined = input.cwd;
+
+  if (!sessionId || !cwd) return;
+
+  const dataDir = resolveDataDir();
+  const wtMatch = findWorktreeForCwd(cwd, dataDir);
+  if (!wtMatch) return;
+
+  const pPath = planFilePath(dataDir, wtMatch.slug, wtMatch.name);
+  if (!existsSync(pPath)) return;
+
+  const now = Date.now();
+  const state = {
+    slug: wtMatch.slug,
+    plan: wtMatch.name,
+    planPath: pPath,
+    startTime: now,
+    lastTick: now,
+  };
+  writeFileSync(sessionStatePath(sessionId), JSON.stringify(state));
+
+  const planStatus = getStatusFromPlan(pPath);
+  appendWorklog(dataDir, {
+    event: "session_start",
+    timestamp: now,
+    plan: wtMatch.name,
+    planStatus,
+  });
+}
+
+async function worklogTick(): Promise<void> {
+  const inputRaw = tryReadFileSync("/dev/stdin");
+  const input: any = tryParseJson(inputRaw, {});
+
+  const sessionId: string | undefined = input.session_id;
+  if (!sessionId) return;
+
+  const statePath = sessionStatePath(sessionId);
+  if (!existsSync(statePath)) return;
+
+  const state: any = tryParseJson(tryReadFileSync(statePath), null);
+  if (!state) return;
+
+  const dataDir = resolveDataDir();
+  const now = Date.now();
+  const elapsedSinceLastTick = now - state.lastTick;
+
+  // Update plan time tracked
+  if (state.planPath) {
+    updatePlanTimeTracked(state.planPath, elapsedSinceLastTick);
+  }
+
+  // Promote pending → in-progress
+  if (state.planPath && existsSync(state.planPath)) {
+    const content = readFileSync(state.planPath, "utf-8");
+    const statusMatch = content.match(/^## Status\s*\n([^\n#]+)/m);
+    if (statusMatch && statusMatch[1].trim() === "pending") {
+      const updated = content.replace(
+        /^(## Status\s*\n)pending/m,
+        "$1in-progress",
+      );
+      writeFileSync(state.planPath, updated);
+    }
+  }
+
+  const planStatus = getStatusFromPlan(state.planPath);
+  const elapsedMs = now - state.startTime;
+  appendWorklog(dataDir, {
+    event: "tick",
+    timestamp: now,
+    plan: state.plan,
+    elapsedMs,
+    planStatus,
+  });
+
+  // Update lastTick in state
+  state.lastTick = now;
+  writeFileSync(statePath, JSON.stringify(state));
+}
+
+// ---------------------------------------------------------------------------
+// Draft PR creation
+// ---------------------------------------------------------------------------
+
+async function pushAndCreateDraftPR(
+  cwd: string,
+  branch: string,
+  target: string,
+): Promise<void> {
+  const s = p.spinner();
+  s.start("Pushing branch to origin...");
+  try {
+    await git(cwd).push("origin", branch, ["--set-upstream"]);
+    s.stop(`Pushed ${pc.cyan(branch)} to origin.`);
+  } catch (err: any) {
+    s.stop(pc.yellow(`Could not push branch: ${err.message || err}`));
+    return;
+  }
+
+  const info = await getRepoInfo(cwd);
+  const octokit = getOctokit();
+  if (!info || !octokit) {
+    p.log.warn(
+      "Could not resolve GitHub repo or token — skipping PR creation.",
+    );
+    return;
+  }
+
+  s.start("Creating draft PR...");
+  try {
+    const { data: pr } = await octokit.rest.pulls.create({
+      owner: info.owner,
+      repo: info.repo,
+      head: branch,
+      base: target,
+      title: branch,
+      body: "WIP",
+      draft: true,
+    });
+    s.stop(`Draft PR: ${pc.underline(pr.html_url)}`);
+  } catch (err: any) {
+    s.stop(pc.yellow(`Could not create draft PR: ${err.message || err}`));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Hook auto-configuration
+// ---------------------------------------------------------------------------
+
+function ensureWorklogHooks(): void {
+  const settings: any = tryParseJson(tryReadFileSync(GLOBAL_SETTINGS_FILE), {});
+
+  const requiredHooks: Record<
+    string,
+    { type: string; command: string; timeout: number }
+  > = {
+    SessionStart: {
+      type: "command",
+      command: "claudet worklog start",
+      timeout: 10,
+    },
+    Stop: { type: "command", command: "claudet worklog tick", timeout: 10 },
+  };
+
+  let changed = false;
+
+  for (const [event, hookDef] of Object.entries(requiredHooks)) {
+    const existing: any[] = settings[event] || [];
+    const hasOurHook = existing.some((matcher: any) =>
+      (matcher.hooks || []).some(
+        (h: any) => h.type === "command" && h.command === hookDef.command,
+      ),
+    );
+
+    if (!hasOurHook) {
+      existing.push({ hooks: [hookDef] });
+      settings[event] = existing;
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    const dir = dirname(GLOBAL_SETTINGS_FILE);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      GLOBAL_SETTINGS_FILE,
+      JSON.stringify(settings, null, 2) + "\n",
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Launch claude
+// ---------------------------------------------------------------------------
+
+function launchClaude(cwd: string): void {
+  ensureWorklogHooks();
+  p.outro(pc.dim(`Launching claude in ${cwd}`));
+  const child = spawn("claude", [], {
+    cwd,
+    stdio: "inherit",
+    env: process.env,
+  });
+  child.on("exit", (code) => process.exit(code ?? 0));
 }
 
 // ---------------------------------------------------------------------------
@@ -575,6 +1102,8 @@ async function autoSync(repoRoot: string): Promise<WorktreesData> {
 // ---------------------------------------------------------------------------
 
 async function createWorktree(
+  dataDir: string,
+  slug: string,
   repoRoot: string,
   branch: string,
   target: string,
@@ -582,8 +1111,7 @@ async function createWorktree(
   skipSetup: boolean,
   ticket?: string,
 ): Promise<WorktreeEntry> {
-  const worktreeDir = resolve(dirname(repoRoot), "worktrees");
-  const wtPath = resolve(worktreeDir, shortName);
+  const wtPath = wtDirPath(dataDir, slug, shortName);
   const g = git(repoRoot);
   const isExisting = await branchExists(branch, repoRoot);
 
@@ -595,8 +1123,9 @@ async function createWorktree(
     bail(`Worktree path already exists: ${wtPath}`);
   }
 
-  if (!existsSync(worktreeDir)) {
-    mkdirSync(worktreeDir, { recursive: true });
+  const wtParent = dirname(wtPath);
+  if (!existsSync(wtParent)) {
+    mkdirSync(wtParent, { recursive: true });
   }
 
   const s = p.spinner();
@@ -682,39 +1211,40 @@ async function createWorktree(
     p.log.step(`Symlinked ${envFiles.length} env file(s) + settings.`);
   }
 
+  // Run setup commands from project config
   if (!skipSetup) {
-    s.start("Installing dependencies...");
-    runLoud("pnpm install", wtPath);
-    s.stop("Dependencies installed.");
-
-    s.start("Generating Prisma client...");
-    runLoud("pnpm exec prisma generate", wtPath);
-    s.stop("Prisma client generated.");
+    const projectConfig = loadProjectConfig(repoRoot);
+    const setupCommands = projectConfig.setup ?? [];
+    for (const cmd of setupCommands) {
+      s.start(`Running: ${pc.dim(cmd)}...`);
+      runLoud(cmd, wtPath);
+      s.stop(`Done: ${pc.dim(cmd)}`);
+    }
   }
 
-  // Create plan file and register
-  const planPath = createPlanFile(shortName, { target, branch, ticket, repo: repoRoot });
+  // Create plan file
+  const pPath = createPlanFile(dataDir, slug, shortName, {
+    target,
+    branch,
+    ticket,
+  });
 
   const entry: WorktreeEntry = {
     branch,
     target,
-    path: wtPath,
-    repo: repoRoot,
-    planPath,
     archivedAt: null,
   };
 
-  registerRepo(repoRoot);
-  const data = loadWorktrees(repoRoot);
+  const data = loadWorktrees(dataDir, slug);
   data.worktrees[shortName] = entry;
-  saveWorktrees(repoRoot, data);
+  saveWorktrees(dataDir, slug, data);
 
   p.note(
     [
       `${pc.dim("Path")}    ${wtPath}`,
       `${pc.dim("Branch")}  ${pc.cyan(branch)}`,
       `${pc.dim("Target")}  ${target}`,
-      `${pc.dim("Plan")}    ${planPath}`,
+      `${pc.dim("Plan")}    ${pPath}`,
     ].join("\n"),
     "Worktree Ready",
   );
@@ -723,298 +1253,19 @@ async function createWorktree(
 }
 
 // ---------------------------------------------------------------------------
-// Plan file helpers
-// ---------------------------------------------------------------------------
-
-function getStatusFromPlan(planPath: string): string {
-  if (!existsSync(planPath)) return "unknown";
-  const content = readFileSync(planPath, "utf-8");
-  const match = content.match(/^## Status\s*\n([^\n#]+)/m);
-  return match ? match[1].trim() : "unknown";
-}
-
-function getLastProgress(planPath: string): string | null {
-  if (!existsSync(planPath)) return null;
-  const content = readFileSync(planPath, "utf-8");
-  const progressSection = content.split("## Progress")[1];
-  if (!progressSection) return null;
-  const lines = progressSection
-    .split("\n")
-    .filter((l) => l.startsWith("- ") && !l.startsWith("<!-- "));
-  return lines.length > 0 ? lines[lines.length - 1].replace(/^- /, "") : null;
-}
-
-// ---------------------------------------------------------------------------
-// Worklog helpers
-// ---------------------------------------------------------------------------
-
-function formatDuration(ms: number): string {
-  const totalSeconds = Math.floor(ms / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours > 0) return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
-  if (minutes > 0) return `${minutes}m`;
-  return `${seconds}s`;
-}
-
-function parseDuration(str: string): number {
-  let ms = 0;
-  const hourMatch = str.match(/(\d+)h/);
-  const minMatch = str.match(/(\d+)m/);
-  const secMatch = str.match(/(\d+)s/);
-  if (hourMatch) ms += parseInt(hourMatch[1], 10) * 3600000;
-  if (minMatch) ms += parseInt(minMatch[1], 10) * 60000;
-  if (secMatch) ms += parseInt(secMatch[1], 10) * 1000;
-  return ms;
-}
-
-function appendWorklog(event: Record<string, unknown>): void {
-  const dir = dirname(WORKLOG_FILE);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  appendFileSync(WORKLOG_FILE, JSON.stringify(event) + "\n");
-}
-
-function sessionStatePath(sessionId: string): string {
-  return join("/tmp", `claudet-worklog-${sessionId}.json`);
-}
-
-function updatePlanTimeTracked(planPath: string, addMs: number): void {
-  if (!existsSync(planPath)) return;
-  const content = readFileSync(planPath, "utf-8");
-
-  // Parse existing time tracked
-  const timeMatch = content.match(/^## Time Tracked\s*\n([^\n#]*)/m);
-  let existingMs = 0;
-  if (timeMatch) {
-    existingMs = parseDuration(timeMatch[1].trim());
-  }
-
-  const totalMs = existingMs + addMs;
-  const formatted = formatDuration(totalMs);
-
-  if (timeMatch) {
-    // Replace existing value
-    const updated = content.replace(
-      /^(## Time Tracked\s*\n)[^\n#]*/m,
-      `$1${formatted}`,
-    );
-    writeFileSync(planPath, updated);
-  } else {
-    // Insert between Status and Progress
-    const updated = content.replace(
-      /^(## Status\s*\n[^\n#]*\n)/m,
-      `$1\n## Time Tracked\n${formatted}\n`,
-    );
-    writeFileSync(planPath, updated);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Worklog hook handlers
-// ---------------------------------------------------------------------------
-
-async function worklogStart(): Promise<void> {
-  const inputRaw = tryReadFileSync("/dev/stdin");
-  const input: any = tryParseJson(inputRaw, {});
-
-  const sessionId: string | undefined = input.session_id;
-  const cwd: string | undefined = input.cwd;
-
-  if (!sessionId || !cwd) return;
-
-  const repos = loadRepos();
-  const wtMatch = findWorktreeForCwd(cwd, repos);
-  if (!wtMatch) return;
-
-  // Find the plan path from worktrees.json
-  let planPath: string | undefined;
-  for (const repoRoot of repos) {
-    const filePath = worktreesFilePath(repoRoot);
-    if (!existsSync(filePath)) continue;
-    const data: WorktreesData = tryParseJson(tryReadFileSync(filePath), {
-      worktrees: {},
-    });
-    const entry = data.worktrees[wtMatch.name];
-    if (entry && !entry.archivedAt) {
-      planPath = entry.planPath;
-      break;
-    }
-  }
-
-  if (!planPath) return;
-
-  const now = Date.now();
-  const state = { plan: wtMatch.name, planPath, startTime: now, lastTick: now };
-  writeFileSync(sessionStatePath(sessionId), JSON.stringify(state));
-
-  const planStatus = getStatusFromPlan(planPath);
-  appendWorklog({
-    event: "session_start",
-    timestamp: now,
-    plan: wtMatch.name,
-    planStatus,
-  });
-}
-
-async function worklogTick(): Promise<void> {
-  const inputRaw = tryReadFileSync("/dev/stdin");
-  const input: any = tryParseJson(inputRaw, {});
-
-  const sessionId: string | undefined = input.session_id;
-  if (!sessionId) return;
-
-  const statePath = sessionStatePath(sessionId);
-  if (!existsSync(statePath)) return;
-
-  const state: any = tryParseJson(tryReadFileSync(statePath), null);
-  if (!state) return;
-
-  const now = Date.now();
-  const elapsedSinceLastTick = now - state.lastTick;
-
-  // Update plan time tracked
-  if (state.planPath) {
-    updatePlanTimeTracked(state.planPath, elapsedSinceLastTick);
-  }
-
-  // Promote pending → in-progress
-  if (state.planPath && existsSync(state.planPath)) {
-    const content = readFileSync(state.planPath, "utf-8");
-    const statusMatch = content.match(/^## Status\s*\n([^\n#]+)/m);
-    if (statusMatch && statusMatch[1].trim() === "pending") {
-      const updated = content.replace(
-        /^(## Status\s*\n)pending/m,
-        "$1in-progress",
-      );
-      writeFileSync(state.planPath, updated);
-    }
-  }
-
-  const planStatus = getStatusFromPlan(state.planPath);
-  const elapsedMs = now - state.startTime;
-  appendWorklog({
-    event: "tick",
-    timestamp: now,
-    plan: state.plan,
-    elapsedMs,
-    planStatus,
-  });
-
-  // Update lastTick in state
-  state.lastTick = now;
-  writeFileSync(statePath, JSON.stringify(state));
-}
-
-// ---------------------------------------------------------------------------
-// Draft PR creation
-// ---------------------------------------------------------------------------
-
-async function pushAndCreateDraftPR(
-  cwd: string,
-  branch: string,
-  target: string,
-): Promise<void> {
-  const s = p.spinner();
-  s.start("Pushing branch to origin...");
-  try {
-    await git(cwd).push("origin", branch, ["--set-upstream"]);
-    s.stop(`Pushed ${pc.cyan(branch)} to origin.`);
-  } catch (err: any) {
-    s.stop(pc.yellow(`Could not push branch: ${err.message || err}`));
-    return;
-  }
-
-  const info = await getRepoInfo(cwd);
-  const octokit = getOctokit();
-  if (!info || !octokit) {
-    p.log.warn(
-      "Could not resolve GitHub repo or token — skipping PR creation.",
-    );
-    return;
-  }
-
-  s.start("Creating draft PR...");
-  try {
-    const { data: pr } = await octokit.rest.pulls.create({
-      owner: info.owner,
-      repo: info.repo,
-      head: branch,
-      base: target,
-      title: branch,
-      body: "WIP",
-      draft: true,
-    });
-    s.stop(`Draft PR: ${pc.underline(pr.html_url)}`);
-  } catch (err: any) {
-    s.stop(pc.yellow(`Could not create draft PR: ${err.message || err}`));
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Hook auto-configuration
-// ---------------------------------------------------------------------------
-
-function ensureWorklogHooks(): void {
-  const settings: any = tryParseJson(tryReadFileSync(GLOBAL_SETTINGS_FILE), {});
-
-  const requiredHooks: Record<string, { type: string; command: string; timeout: number }> = {
-    SessionStart: { type: "command", command: "claudet worklog start", timeout: 10 },
-    Stop: { type: "command", command: "claudet worklog tick", timeout: 10 },
-  };
-
-  let changed = false;
-
-  for (const [event, hookDef] of Object.entries(requiredHooks)) {
-    const existing: any[] = settings[event] || [];
-    // Check if our hook already exists in any matcher's hooks array
-    const hasOurHook = existing.some((matcher: any) =>
-      (matcher.hooks || []).some(
-        (h: any) => h.type === "command" && h.command === hookDef.command,
-      ),
-    );
-
-    if (!hasOurHook) {
-      // Add a new matcher with our hook
-      existing.push({ hooks: [hookDef] });
-      settings[event] = existing;
-      changed = true;
-    }
-  }
-
-  if (changed) {
-    const dir = dirname(GLOBAL_SETTINGS_FILE);
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(GLOBAL_SETTINGS_FILE, JSON.stringify(settings, null, 2) + "\n");
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Launch claude
-// ---------------------------------------------------------------------------
-
-function launchClaude(cwd: string): void {
-  ensureWorklogHooks();
-  p.outro(pc.dim(`Launching claude in ${cwd}`));
-  const child = spawn("claude", [], {
-    cwd,
-    stdio: "inherit",
-    env: process.env,
-  });
-  child.on("exit", (code) => process.exit(code ?? 0));
-}
-
-// ---------------------------------------------------------------------------
 // Interactive flow
 // ---------------------------------------------------------------------------
 
-async function interactiveFlow(): Promise<void> {
-  p.intro(`${pc.bold(pc.cyan("claudet"))} ${pc.dim(`v${PKG_VERSION}`)}`);
-
-  migrateGlobalWorktrees();
-
-  // Discover repos from registry
-  const repos = loadRepos().filter((r) => existsSync(r));
+async function pickRepo(
+  dataDir: string,
+): Promise<{ slug: string; repoRoot: string }> {
+  const slugs = loadRepoSlugs(dataDir);
+  const repos = slugs
+    .map((slug) => ({ slug, repoRoot: getRepoRoot(dataDir, slug) }))
+    .filter(
+      (r): r is { slug: string; repoRoot: string } =>
+        r.repoRoot !== null && existsSync(r.repoRoot),
+    );
 
   if (repos.length === 0) {
     const input = await p.text({
@@ -1022,28 +1273,58 @@ async function interactiveFlow(): Promise<void> {
       placeholder: "~/repos/my-project",
     });
     if (cancelled(input)) bail("Cancelled.");
-    const root = resolve((input as string).replace(/^~/, HOME));
+    const root = resolve(expandHome((input as string).trim()));
     if (!existsSync(root)) bail(`Path does not exist: ${root}`);
-    registerRepo(root);
-    repos.push(root);
+    const slug = registerRepo(dataDir, root);
+    return { slug, repoRoot: root };
   }
 
-  const repoRoot = await pickRepo(repos);
-  const data = await autoSync(repoRoot);
+  if (repos.length === 1) {
+    const { slug, repoRoot } = repos[0];
+    p.log.step(
+      `Repository: ${pc.cyan(basename(dirname(repoRoot)) + "/" + basename(repoRoot))}`,
+    );
+    return { slug, repoRoot };
+  }
 
-  // Filter active worktrees
+  const selected = await p.select({
+    message: "Select repository",
+    options: repos.map((r) => ({
+      value: r.slug,
+      label: `${basename(dirname(r.repoRoot))}/${basename(r.repoRoot)}`,
+      hint: r.repoRoot,
+    })),
+  });
+  if (cancelled(selected)) bail("Cancelled.");
+  return repos.find((r) => r.slug === (selected as string))!;
+}
+
+async function interactiveFlow(): Promise<void> {
+  p.intro(`${pc.bold(pc.cyan("claudet"))} ${pc.dim(`v${PKG_VERSION}`)}`);
+
+  const dataDir = resolveDataDir();
+  migrateToConsolidatedDir(dataDir);
+
+  const { slug, repoRoot } = await pickRepo(dataDir);
+
+  const s = p.spinner();
+  s.start("Loading worktrees...");
+  const data = await reconcileWorktrees(dataDir, slug, repoRoot);
+  const activeCount = Object.entries(data.worktrees).filter(
+    ([name, entry]) => !entry.archivedAt && !isSmokeTestWorktree(name),
+  ).length;
+  s.stop(activeCount > 0 ? "Worktrees loaded." : "No active worktrees found.");
+
   const activeEntries = Object.entries(data.worktrees).filter(
-    ([name, entry]) =>
-      entry.repo === repoRoot &&
-      !entry.archivedAt &&
-      !isSmokeTestWorktree(name),
+    ([name, entry]) => !entry.archivedAt && !isSmokeTestWorktree(name),
   );
 
   if (activeEntries.length === 0) {
-    p.log.warn("No active worktrees found.");
-    const shouldCreate = await p.confirm({ message: "Create a new worktree?" });
+    const shouldCreate = await p.confirm({
+      message: "Create a new worktree?",
+    });
     if (cancelled(shouldCreate) || !shouldCreate) bail("Cancelled.");
-    await createNewWorktreeFlow(repoRoot);
+    await createNewWorktreeFlow(dataDir, slug, repoRoot);
     return;
   }
 
@@ -1060,7 +1341,7 @@ async function interactiveFlow(): Promise<void> {
   const CREATE_NEW = "__create_new__";
   const options = [
     ...activeEntries.map(([name, entry]) => {
-      const status = getStatusFromPlan(entry.planPath);
+      const status = getStatusFromPlan(planFilePath(dataDir, slug, name));
       const pr = prStatuses.get(name);
       return {
         value: name,
@@ -1083,18 +1364,20 @@ async function interactiveFlow(): Promise<void> {
   if (cancelled(selection)) bail("Cancelled.");
 
   if (selection === CREATE_NEW) {
-    await createNewWorktreeFlow(repoRoot);
+    await createNewWorktreeFlow(dataDir, slug, repoRoot);
     return;
   }
 
-  // Selected existing worktree
-  const entry = data.worktrees[selection as string];
-  const status = getStatusFromPlan(entry.planPath);
-  const lastProgress = getLastProgress(entry.planPath);
+  const selectedName = selection as string;
+  const entry = data.worktrees[selectedName];
+  const pPath = planFilePath(dataDir, slug, selectedName);
+  const selectedWtPath = wtDirPath(dataDir, slug, selectedName);
+  const status = getStatusFromPlan(pPath);
+  const lastProgress = getLastProgress(pPath);
 
-  const pr = prStatuses.get(selection as string) ?? null;
+  const pr = prStatuses.get(selectedName) ?? null;
   const infoLines = [
-    `${pc.dim("Plan")}    ${entry.planPath}`,
+    `${pc.dim("Plan")}    ${pPath}`,
     `${pc.dim("Status")}  ${statusBadge(status)}`,
   ];
   if (pr) {
@@ -1105,7 +1388,7 @@ async function interactiveFlow(): Promise<void> {
   if (lastProgress) {
     infoLines.push(`${pc.dim("Last")}    ${lastProgress}`);
   }
-  p.note(infoLines.join("\n"), selection as string);
+  p.note(infoLines.join("\n"), selectedName);
 
   // Offer to create a draft PR if none exists
   if (!pr) {
@@ -1114,18 +1397,25 @@ async function interactiveFlow(): Promise<void> {
       initialValue: false,
     });
     if (!cancelled(createPR) && createPR) {
-      await pushAndCreateDraftPR(entry.path, entry.branch, entry.target);
+      await pushAndCreateDraftPR(selectedWtPath, entry.branch, entry.target);
     }
   }
 
-  launchClaude(entry.path);
+  launchClaude(selectedWtPath);
 }
 
 // ---------------------------------------------------------------------------
 // Create new worktree flow
 // ---------------------------------------------------------------------------
 
-async function createNewWorktreeFlow(repoRoot: string): Promise<void> {
+async function createNewWorktreeFlow(
+  dataDir: string,
+  slug: string,
+  repoRoot: string,
+): Promise<void> {
+  const projectConfig = loadProjectConfig(repoRoot);
+  const defaultTarget = projectConfig.defaultTarget || "dev";
+
   const result = await p.group(
     {
       branch: () =>
@@ -1137,8 +1427,8 @@ async function createNewWorktreeFlow(repoRoot: string): Promise<void> {
       target: () =>
         p.text({
           message: "Target branch",
-          placeholder: "dev",
-          initialValue: "dev",
+          placeholder: defaultTarget,
+          initialValue: defaultTarget,
         }),
       ticket: () =>
         p.text({
@@ -1157,12 +1447,14 @@ async function createNewWorktreeFlow(repoRoot: string): Promise<void> {
   );
 
   const branch = result.branch as string;
-  const target = (result.target as string) || "dev";
+  const target = (result.target as string) || defaultTarget;
   const ticket = result.ticket as string;
   const draftPR = result.draftPR as boolean;
   const shortName = deriveShortName(branch);
 
   const entry = await createWorktree(
+    dataDir,
+    slug,
     repoRoot,
     branch,
     target,
@@ -1171,12 +1463,13 @@ async function createNewWorktreeFlow(repoRoot: string): Promise<void> {
     ticket || undefined,
   );
 
-  // Create draft PR
+  const wtPath = wtDirPath(dataDir, slug, shortName);
+
   if (draftPR) {
-    await pushAndCreateDraftPR(entry.path, branch, target);
+    await pushAndCreateDraftPR(wtPath, branch, target);
   }
 
-  launchClaude(entry.path);
+  launchClaude(wtPath);
 }
 
 // ---------------------------------------------------------------------------
@@ -1186,20 +1479,19 @@ async function createNewWorktreeFlow(repoRoot: string): Promise<void> {
 async function cleanFlow(): Promise<void> {
   p.intro(pc.bold(pc.red("claudet clean")));
 
-  migrateGlobalWorktrees();
+  const dataDir = resolveDataDir();
+  migrateToConsolidatedDir(dataDir);
 
-  // Select repo
-  const repos = loadRepos().filter((r) => existsSync(r));
-
-  if (repos.length === 0) {
+  const slugs = loadRepoSlugs(dataDir);
+  if (slugs.length === 0) {
     p.log.info("No registered repositories.");
     p.outro("Done.");
     return;
   }
 
-  const repoRoot = await pickRepo(repos);
+  const { slug, repoRoot } = await pickRepo(dataDir);
 
-  const data = loadWorktrees(repoRoot);
+  const data = loadWorktrees(dataDir, slug);
   const allEntries = Object.entries(data.worktrees);
 
   // Auto-remove smoke test worktrees
@@ -1210,9 +1502,10 @@ async function cleanFlow(): Promise<void> {
       delete data.worktrees[name];
       continue;
     }
-    const g = git(entry.repo);
+    const g = git(repoRoot);
+    const smokeWtPath = wtDirPath(dataDir, slug, name);
     try {
-      await g.raw("worktree", "remove", entry.path, "--force");
+      await g.raw("worktree", "remove", smokeWtPath, "--force");
     } catch {
       /* already gone */
     }
@@ -1229,14 +1522,13 @@ async function cleanFlow(): Promise<void> {
     p.log.success(`Auto-removed ${smokeRemoved} smoke test worktree(s).`);
   }
 
-  // Filter active, non-smoke worktrees
   const activeEntries = Object.entries(data.worktrees).filter(
     ([name, entry]) => !entry.archivedAt && !isSmokeTestWorktree(name),
   );
 
   if (activeEntries.length === 0) {
     p.log.info("No active worktrees to clean.");
-    saveWorktrees(repoRoot, data);
+    saveWorktrees(dataDir, slug, data);
     p.outro("Done.");
     return;
   }
@@ -1253,7 +1545,7 @@ async function cleanFlow(): Promise<void> {
   const selected = await p.multiselect({
     message: "Select worktrees to remove",
     options: activeEntries.map(([name, entry]) => {
-      const status = getStatusFromPlan(entry.planPath);
+      const status = getStatusFromPlan(planFilePath(dataDir, slug, name));
       const pr = prStatuses.get(name);
       return {
         value: name,
@@ -1269,7 +1561,7 @@ async function cleanFlow(): Promise<void> {
   const selectedNames = selected as string[];
   if (selectedNames.length === 0) {
     p.log.info("No worktrees selected.");
-    saveWorktrees(repoRoot, data);
+    saveWorktrees(dataDir, slug, data);
     p.outro("Done.");
     return;
   }
@@ -1279,19 +1571,20 @@ async function cleanFlow(): Promise<void> {
   });
   if (cancelled(confirmed) || !confirmed) {
     p.log.info("Cancelled.");
-    saveWorktrees(repoRoot, data);
+    saveWorktrees(dataDir, slug, data);
     p.outro("Done.");
     return;
   }
 
-  const s = p.spinner();
+  const archiveSpinner = p.spinner();
   for (const name of selectedNames) {
     const entry = data.worktrees[name];
-    s.start(`Archiving ${pc.bold(name)}...`);
+    archiveSpinner.start(`Archiving ${pc.bold(name)}...`);
 
-    const g = git(entry.repo);
+    const archiveWtPath = wtDirPath(dataDir, slug, name);
+    const g = git(repoRoot);
     try {
-      await g.raw("worktree", "remove", entry.path, "--force");
+      await g.raw("worktree", "remove", archiveWtPath, "--force");
     } catch {
       // already gone
     }
@@ -1304,10 +1597,10 @@ async function cleanFlow(): Promise<void> {
       archivedAt: new Date().toISOString(),
     };
 
-    s.stop(`Archived ${pc.bold(name)}.`);
+    archiveSpinner.stop(`Archived ${pc.bold(name)}.`);
   }
 
-  saveWorktrees(repoRoot, data);
+  saveWorktrees(dataDir, slug, data);
   p.outro(pc.green(`Archived ${selectedNames.length} worktree(s).`));
 }
 
@@ -1324,9 +1617,8 @@ async function statusLine(): Promise<void> {
 
   const parts: string[] = [];
 
-  // Match cwd against worktree paths across all registered repos
-  const repos = loadRepos();
-  const wtMatch = cwd ? findWorktreeForCwd(cwd, repos) : null;
+  const dataDir = resolveDataDir();
+  const wtMatch = cwd ? findWorktreeForCwd(cwd, dataDir) : null;
   if (wtMatch) {
     parts.push(wtMatch.name);
     if (wtMatch.branch) parts.push(wtMatch.branch);
