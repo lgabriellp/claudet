@@ -1,6 +1,6 @@
 ## Worktree Session
 
-**Plan file:** ~/.claudet/repos/<slug>/plans/worklog.md (derived from repo slug + worktree name)
+**Plan file:** /Users/lgabriel/.claudet/repos/vibe--claudet/plans/worklog.md
 **Branch:** feature/worklog → main
 
 ### Session Protocol

@@ -10,30 +10,39 @@ Every plan file must include these sections:
 # <Plan Title>
 
 ## Context
+
 Why this change is needed — the problem or opportunity.
 
 ## Objective
+
 What will be done — deliverables and scope.
 
 ## ClickUp Ticket
+
 Link or ID (if applicable).
 
 ## Target Branch
+
 Base branch for the PR (e.g., `dev`, `main`).
 
 ## Key Files
+
 Files to be created or modified.
 
 ## Test Scenarios
+
 Grouped by tier when testable (see Test Scenario Format below).
 
 ## Verification
+
 How to confirm the changes work end-to-end — commands, tests, manual checks.
 
 ## Status
+
 pending | in-progress | review | done
 
 ## Progress
+
 Append-only log of work done each session.
 ```
 
@@ -104,21 +113,26 @@ When creating a PR, use this structure:
 
 ```markdown
 ## Context & Objective
+
 Copied from the plan file — why and what.
 
 ## Changes
+
 Bulleted summary grouped by area:
+
 - **Area 1:** What changed and why
 - **Area 2:** What changed and why
 
 ## Test Specifications
+
 Doc comments from each new or updated test — the scenario descriptions.
 
 ## Test Results
+
 | Tier | Added | Removed | Total | Duration | ΔDuration |
-|------|-------|---------|-------|----------|-----------|
-| Unit | +3 | -0 | 42 | 8.2s | +0.4s |
-| E2E | +1 | -0 | 15 | 45s | +3s |
+| ---- | ----- | ------- | ----- | -------- | --------- |
+| Unit | +3    | -0      | 42    | 8.2s     | +0.4s     |
+| E2E  | +1    | -0      | 15    | 45s      | +3s       |
 ```
 
 ### PR Guidelines
@@ -132,13 +146,13 @@ Doc comments from each new or updated test — the scenario descriptions.
 
 Suggested `.claude/` structure for any project:
 
-| File | Purpose |
-|------|---------|
-| `CLAUDE.md` | Main instructions, quick reference |
+| File              | Purpose                                                           |
+| ----------------- | ----------------------------------------------------------------- |
+| `CLAUDE.md`       | Main instructions, quick reference                                |
 | `ARCHITECTURE.md` | System architecture, entity relationships, layer responsibilities |
-| `PATTERNS.md` | Code patterns cookbook (API, component, hook, state examples) |
-| `DECISIONS.md` | Architecture Decision Records (ADRs) |
-| `rules/*.md` | Domain-specific conventions (api, components, testing, etc.) |
+| `PATTERNS.md`     | Code patterns cookbook (API, component, hook, state examples)     |
+| `DECISIONS.md`    | Architecture Decision Records (ADRs)                              |
+| `rules/*.md`      | Domain-specific conventions (api, components, testing, etc.)      |
 
 ### Principles
 
@@ -155,6 +169,7 @@ All change requests — including verbal, ad-hoc, or out-of-plan-mode changes �
 
 ```markdown
 ### YYYY-MM-DD — Session N
+
 - Started: brief description of starting point
 - Did: what was accomplished
 - Next: what remains (if applicable)
