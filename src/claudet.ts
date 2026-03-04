@@ -15,6 +15,20 @@ import * as p from "@clack/prompts";
 import pc from "picocolors";
 import simpleGit, { type SimpleGit } from "simple-git";
 import { Octokit } from "@octokit/rest";
+import {
+  tryParseJson,
+  expandHome,
+  toMergeableStatus,
+  deriveRepoSlug,
+  deriveShortName,
+  isSmokeTestWorktree,
+  parseCreateFlags,
+  formatDuration,
+  parseDuration,
+  getStatusFromPlan as getStatusFromPlanContent,
+  getLastProgress as getLastProgressContent,
+  type CreateFlags,
+} from "./helpers.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -53,72 +67,6 @@ function tryReadFileSync(filePath: string, fallback = ""): string {
   }
 }
 
-function tryParseJson<T>(str: string, fallback: T): T {
-  try {
-    return JSON.parse(str) as T;
-  } catch {
-    return fallback;
-  }
-}
-
-function expandHome(input: string): string {
-  return input.replace(/^~(?=$|\/)/, HOME);
-}
-
-// ---------------------------------------------------------------------------
-// `claudet create` flag parsing
-// ---------------------------------------------------------------------------
-
-interface CreateFlags {
-  branch: string;
-  target?: string;
-  ticket?: string;
-  draftPR: boolean;
-  skipSetup: boolean;
-  repo?: string;
-}
-
-function parseCreateFlags(argv: string[]): CreateFlags {
-  const flags: CreateFlags = { branch: "", draftPR: false, skipSetup: false };
-  let i = 0;
-  while (i < argv.length) {
-    const arg = argv[i];
-    switch (arg) {
-      case "--branch":
-      case "-b":
-        flags.branch = argv[++i] ?? "";
-        break;
-      case "--target":
-      case "-t":
-        flags.target = argv[++i] ?? "";
-        break;
-      case "--ticket":
-        flags.ticket = argv[++i] ?? "";
-        break;
-      case "--draft-pr":
-        flags.draftPR = true;
-        break;
-      case "--skip-setup":
-        flags.skipSetup = true;
-        break;
-      case "--repo":
-        flags.repo = argv[++i] ?? "";
-        break;
-      default:
-        break;
-    }
-    i++;
-  }
-  return flags;
-}
-
-function toMergeableStatus(
-  m: boolean | null | undefined,
-): PRStatus["mergeable"] {
-  if (m === true) return "MERGEABLE";
-  if (m === false) return "CONFLICTING";
-  return "UNKNOWN";
-}
 
 // ---------------------------------------------------------------------------
 // Configuration & path resolution
@@ -169,10 +117,6 @@ function resolveDataDir(repoRoot?: string): string {
 // ---------------------------------------------------------------------------
 // Path derivation
 // ---------------------------------------------------------------------------
-
-function deriveRepoSlug(repoRoot: string): string {
-  return `${basename(dirname(repoRoot))}--${basename(repoRoot)}`;
-}
 
 function repoDir(dataDir: string, slug: string): string {
   return resolve(dataDir, "repos", slug);
@@ -427,20 +371,12 @@ pending
 
 function getStatusFromPlan(pPath: string): string {
   if (!existsSync(pPath)) return "unknown";
-  const content = readFileSync(pPath, "utf-8");
-  const match = content.match(/^## Status\s*\n([^\n#]+)/m);
-  return match ? match[1].trim() : "unknown";
+  return getStatusFromPlanContent(readFileSync(pPath, "utf-8"));
 }
 
 function getLastProgress(pPath: string): string | null {
   if (!existsSync(pPath)) return null;
-  const content = readFileSync(pPath, "utf-8");
-  const progressSection = content.split("## Progress")[1];
-  if (!progressSection) return null;
-  const lines = progressSection
-    .split("\n")
-    .filter((l) => l.startsWith("- ") && !l.startsWith("<!-- "));
-  return lines.length > 0 ? lines[lines.length - 1].replace(/^- /, "") : null;
+  return getLastProgressContent(readFileSync(pPath, "utf-8"));
 }
 
 // ---------------------------------------------------------------------------
@@ -472,19 +408,6 @@ async function branchExists(branch: string, cwd: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-function deriveShortName(branch: string): string {
-  return branch
-    .replace(/^(feat|fix|chore|feature|test)\//, "")
-    .replace(/\//g, "-");
-}
-
-function isSmokeTestWorktree(name: string): boolean {
-  return (
-    name.startsWith("worktree-smoke-") ||
-    name.startsWith("test-worktree-smoke-")
-  );
 }
 
 async function discoverRepoRoot(cwd: string): Promise<string> {
@@ -615,27 +538,6 @@ async function fetchPRStatuses(
 // ---------------------------------------------------------------------------
 // Worklog helpers
 // ---------------------------------------------------------------------------
-
-function formatDuration(ms: number): string {
-  const totalSeconds = Math.floor(ms / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours > 0) return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
-  if (minutes > 0) return `${minutes}m`;
-  return `${seconds}s`;
-}
-
-function parseDuration(str: string): number {
-  let ms = 0;
-  const hourMatch = str.match(/(\d+)h/);
-  const minMatch = str.match(/(\d+)m/);
-  const secMatch = str.match(/(\d+)s/);
-  if (hourMatch) ms += parseInt(hourMatch[1], 10) * 3600000;
-  if (minMatch) ms += parseInt(minMatch[1], 10) * 60000;
-  if (secMatch) ms += parseInt(secMatch[1], 10) * 1000;
-  return ms;
-}
 
 function appendWorklog(dataDir: string, event: Record<string, unknown>): void {
   const wlPath = worklogPath(dataDir);
@@ -965,13 +867,24 @@ function ensureWorklogHooks(): void {
 // Launch claude
 // ---------------------------------------------------------------------------
 
+function writeSessionRule(wtPath: string, planPath: string): void {
+  const rulesDir = resolve(wtPath, ".claude", "rules");
+  if (!existsSync(rulesDir)) mkdirSync(rulesDir, { recursive: true });
+  const content = `# Session Context (auto-generated by claudet)
+
+## Plan File
+${planPath}
+`;
+  writeFileSync(resolve(rulesDir, "session.md"), content);
+}
+
 function launchClaude(cwd: string, planPath?: string): void {
   ensureWorklogHooks();
+  if (planPath) {
+    writeSessionRule(cwd, planPath);
+  }
   p.outro(pc.dim(`Launching claude in ${cwd}`));
   const args: string[] = [];
-  if (planPath) {
-    args.push(`Read the plan file at ${planPath} and begin.`);
-  }
   const child = spawn("claude", args, {
     cwd,
     stdio: "inherit",
