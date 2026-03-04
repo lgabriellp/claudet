@@ -1,5 +1,6 @@
 import { execSync, spawn } from "child_process";
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -29,6 +30,8 @@ const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const REPOS_FILE = resolve(HOME, ".claude", "repos.json");
 const GLOBAL_WORKTREES_FILE = resolve(HOME, ".claude", "worktrees.json");
 const PLANS_DIR = resolve(HOME, ".claude", "plans");
+const WORKLOG_FILE = resolve(HOME, ".claude", "worklog.jsonl");
+const GLOBAL_SETTINGS_FILE = resolve(HOME, ".claude", "settings.json");
 
 function worktreesFilePath(repoRoot: string): string {
   return resolve(repoRoot, ".claude", "worktrees.json");
@@ -298,12 +301,20 @@ function saveWorktrees(repoRoot: string, data: WorktreesData): void {
 // Plan file management
 // ---------------------------------------------------------------------------
 
-function createPlanFile(name: string, entry: Partial<WorktreeEntry>): string {
+function createPlanFile(
+  name: string,
+  entry: Partial<WorktreeEntry> & { ticket?: string; repo?: string },
+): string {
   const planPath = resolve(PLANS_DIR, `${name}.md`);
   if (!existsSync(PLANS_DIR)) mkdirSync(PLANS_DIR, { recursive: true });
 
   if (!existsSync(planPath)) {
-    const today = new Date().toISOString().split("T")[0];
+    const now = new Date();
+    const date = now.toISOString().split("T")[0];
+    const time = now.toTimeString().slice(0, 5);
+    const ticketSection = entry.ticket
+      ? `\n## Ticket\n${entry.ticket}\n`
+      : "";
     const content = `# ${name}
 
 ## Context
@@ -311,10 +322,7 @@ function createPlanFile(name: string, entry: Partial<WorktreeEntry>): string {
 
 ## Objective
 <!-- What will be done -->
-
-## ClickUp Ticket
-<!-- Link or ID, e.g., CU-abc123 -->
-
+${ticketSection}
 ## Target Branch
 ${entry.target || "dev"}
 
@@ -327,12 +335,21 @@ ${entry.target || "dev"}
 ## Status
 pending
 
+## Time Tracked
+0m
+
 ## Progress
 <!-- Append-only log. Claude and user append entries as work progresses. -->
 <!-- ALL change requests must be logged here, even when requested outside Claude plan mode. -->
-- ${today}: Created worktree, started planning
+- ${date} ${time}: Created worktree, started planning
 `;
     writeFileSync(planPath, content);
+
+    appendWorklog({
+      event: "plan_created",
+      timestamp: Date.now(),
+      plan: name,
+    });
   }
 
   return planPath;
@@ -528,7 +545,7 @@ async function autoSync(repoRoot: string): Promise<WorktreesData> {
     if (isSmokeTestWorktree(shortName)) continue;
     if (data.worktrees[shortName]) continue;
 
-    const planPath = createPlanFile(shortName, { target: "dev", branch });
+    const planPath = createPlanFile(shortName, { target: "dev", branch, repo: repoRoot });
 
     data.worktrees[shortName] = {
       branch,
@@ -563,6 +580,7 @@ async function createWorktree(
   target: string,
   shortName: string,
   skipSetup: boolean,
+  ticket?: string,
 ): Promise<WorktreeEntry> {
   const worktreeDir = resolve(dirname(repoRoot), "worktrees");
   const wtPath = resolve(worktreeDir, shortName);
@@ -675,7 +693,7 @@ async function createWorktree(
   }
 
   // Create plan file and register
-  const planPath = createPlanFile(shortName, { target, branch });
+  const planPath = createPlanFile(shortName, { target, branch, ticket, repo: repoRoot });
 
   const entry: WorktreeEntry = {
     branch,
@@ -727,6 +745,168 @@ function getLastProgress(planPath: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// Worklog helpers
+// ---------------------------------------------------------------------------
+
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+  if (minutes > 0) return `${minutes}m`;
+  return `${seconds}s`;
+}
+
+function parseDuration(str: string): number {
+  let ms = 0;
+  const hourMatch = str.match(/(\d+)h/);
+  const minMatch = str.match(/(\d+)m/);
+  const secMatch = str.match(/(\d+)s/);
+  if (hourMatch) ms += parseInt(hourMatch[1], 10) * 3600000;
+  if (minMatch) ms += parseInt(minMatch[1], 10) * 60000;
+  if (secMatch) ms += parseInt(secMatch[1], 10) * 1000;
+  return ms;
+}
+
+function appendWorklog(event: Record<string, unknown>): void {
+  const dir = dirname(WORKLOG_FILE);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  appendFileSync(WORKLOG_FILE, JSON.stringify(event) + "\n");
+}
+
+function sessionStatePath(sessionId: string): string {
+  return join("/tmp", `claudet-worklog-${sessionId}.json`);
+}
+
+function updatePlanTimeTracked(planPath: string, addMs: number): void {
+  if (!existsSync(planPath)) return;
+  const content = readFileSync(planPath, "utf-8");
+
+  // Parse existing time tracked
+  const timeMatch = content.match(/^## Time Tracked\s*\n([^\n#]*)/m);
+  let existingMs = 0;
+  if (timeMatch) {
+    existingMs = parseDuration(timeMatch[1].trim());
+  }
+
+  const totalMs = existingMs + addMs;
+  const formatted = formatDuration(totalMs);
+
+  if (timeMatch) {
+    // Replace existing value
+    const updated = content.replace(
+      /^(## Time Tracked\s*\n)[^\n#]*/m,
+      `$1${formatted}`,
+    );
+    writeFileSync(planPath, updated);
+  } else {
+    // Insert between Status and Progress
+    const updated = content.replace(
+      /^(## Status\s*\n[^\n#]*\n)/m,
+      `$1\n## Time Tracked\n${formatted}\n`,
+    );
+    writeFileSync(planPath, updated);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Worklog hook handlers
+// ---------------------------------------------------------------------------
+
+async function worklogStart(): Promise<void> {
+  const inputRaw = tryReadFileSync("/dev/stdin");
+  const input: any = tryParseJson(inputRaw, {});
+
+  const sessionId: string | undefined = input.session_id;
+  const cwd: string | undefined = input.cwd;
+
+  if (!sessionId || !cwd) return;
+
+  const repos = loadRepos();
+  const wtMatch = findWorktreeForCwd(cwd, repos);
+  if (!wtMatch) return;
+
+  // Find the plan path from worktrees.json
+  let planPath: string | undefined;
+  for (const repoRoot of repos) {
+    const filePath = worktreesFilePath(repoRoot);
+    if (!existsSync(filePath)) continue;
+    const data: WorktreesData = tryParseJson(tryReadFileSync(filePath), {
+      worktrees: {},
+    });
+    const entry = data.worktrees[wtMatch.name];
+    if (entry && !entry.archivedAt) {
+      planPath = entry.planPath;
+      break;
+    }
+  }
+
+  if (!planPath) return;
+
+  const now = Date.now();
+  const state = { plan: wtMatch.name, planPath, startTime: now, lastTick: now };
+  writeFileSync(sessionStatePath(sessionId), JSON.stringify(state));
+
+  const planStatus = getStatusFromPlan(planPath);
+  appendWorklog({
+    event: "session_start",
+    timestamp: now,
+    plan: wtMatch.name,
+    planStatus,
+  });
+}
+
+async function worklogTick(): Promise<void> {
+  const inputRaw = tryReadFileSync("/dev/stdin");
+  const input: any = tryParseJson(inputRaw, {});
+
+  const sessionId: string | undefined = input.session_id;
+  if (!sessionId) return;
+
+  const statePath = sessionStatePath(sessionId);
+  if (!existsSync(statePath)) return;
+
+  const state: any = tryParseJson(tryReadFileSync(statePath), null);
+  if (!state) return;
+
+  const now = Date.now();
+  const elapsedSinceLastTick = now - state.lastTick;
+
+  // Update plan time tracked
+  if (state.planPath) {
+    updatePlanTimeTracked(state.planPath, elapsedSinceLastTick);
+  }
+
+  // Promote pending → in-progress
+  if (state.planPath && existsSync(state.planPath)) {
+    const content = readFileSync(state.planPath, "utf-8");
+    const statusMatch = content.match(/^## Status\s*\n([^\n#]+)/m);
+    if (statusMatch && statusMatch[1].trim() === "pending") {
+      const updated = content.replace(
+        /^(## Status\s*\n)pending/m,
+        "$1in-progress",
+      );
+      writeFileSync(state.planPath, updated);
+    }
+  }
+
+  const planStatus = getStatusFromPlan(state.planPath);
+  const elapsedMs = now - state.startTime;
+  appendWorklog({
+    event: "tick",
+    timestamp: now,
+    plan: state.plan,
+    elapsedMs,
+    planStatus,
+  });
+
+  // Update lastTick in state
+  state.lastTick = now;
+  writeFileSync(statePath, JSON.stringify(state));
+}
+
+// ---------------------------------------------------------------------------
 // Draft PR creation
 // ---------------------------------------------------------------------------
 
@@ -772,10 +952,49 @@ async function pushAndCreateDraftPR(
 }
 
 // ---------------------------------------------------------------------------
+// Hook auto-configuration
+// ---------------------------------------------------------------------------
+
+function ensureWorklogHooks(): void {
+  const settings: any = tryParseJson(tryReadFileSync(GLOBAL_SETTINGS_FILE), {});
+
+  const requiredHooks: Record<string, { type: string; command: string; timeout: number }> = {
+    SessionStart: { type: "command", command: "claudet worklog start", timeout: 10 },
+    Stop: { type: "command", command: "claudet worklog tick", timeout: 10 },
+  };
+
+  let changed = false;
+
+  for (const [event, hookDef] of Object.entries(requiredHooks)) {
+    const existing: any[] = settings[event] || [];
+    // Check if our hook already exists in any matcher's hooks array
+    const hasOurHook = existing.some((matcher: any) =>
+      (matcher.hooks || []).some(
+        (h: any) => h.type === "command" && h.command === hookDef.command,
+      ),
+    );
+
+    if (!hasOurHook) {
+      // Add a new matcher with our hook
+      existing.push({ hooks: [hookDef] });
+      settings[event] = existing;
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    const dir = dirname(GLOBAL_SETTINGS_FILE);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(GLOBAL_SETTINGS_FILE, JSON.stringify(settings, null, 2) + "\n");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Launch claude
 // ---------------------------------------------------------------------------
 
 function launchClaude(cwd: string): void {
+  ensureWorklogHooks();
   p.outro(pc.dim(`Launching claude in ${cwd}`));
   const child = spawn("claude", [], {
     cwd,
@@ -921,10 +1140,10 @@ async function createNewWorktreeFlow(repoRoot: string): Promise<void> {
           placeholder: "dev",
           initialValue: "dev",
         }),
-      clickup: () =>
+      ticket: () =>
         p.text({
-          message: "ClickUp ticket",
-          placeholder: "CU-abc123 (optional)",
+          message: "Issue tracker ticket",
+          placeholder: "CU-abc123, JIRA-456, LIN-789 (optional)",
         }),
       draftPR: () =>
         p.confirm({
@@ -939,7 +1158,7 @@ async function createNewWorktreeFlow(repoRoot: string): Promise<void> {
 
   const branch = result.branch as string;
   const target = (result.target as string) || "dev";
-  const clickup = result.clickup as string;
+  const ticket = result.ticket as string;
   const draftPR = result.draftPR as boolean;
   const shortName = deriveShortName(branch);
 
@@ -949,17 +1168,8 @@ async function createNewWorktreeFlow(repoRoot: string): Promise<void> {
     target,
     shortName,
     false,
+    ticket || undefined,
   );
-
-  // Write ClickUp ticket to plan if provided
-  if (clickup) {
-    const planContent = readFileSync(entry.planPath, "utf-8");
-    const updated = planContent.replace(
-      /## ClickUp Ticket\n<!-- Link or ID, e.g., CU-abc123 -->/,
-      `## ClickUp Ticket\n${clickup}`,
-    );
-    writeFileSync(entry.planPath, updated);
-  }
 
   // Create draft PR
   if (draftPR) {
@@ -1166,7 +1376,7 @@ async function statusLine(): Promise<void> {
 // CLI
 // ---------------------------------------------------------------------------
 
-const [subcommand] = process.argv.slice(2);
+const [subcommand, subArg] = process.argv.slice(2);
 
 switch (subcommand) {
   case "clean":
@@ -1181,6 +1391,25 @@ switch (subcommand) {
       process.exit(1);
     });
     break;
+  case "worklog":
+    switch (subArg) {
+      case "start":
+        worklogStart().catch((err) => {
+          console.error(err);
+          process.exit(1);
+        });
+        break;
+      case "tick":
+        worklogTick().catch((err) => {
+          console.error(err);
+          process.exit(1);
+        });
+        break;
+      default:
+        console.error(`Unknown worklog command: ${subArg}`);
+        process.exit(1);
+    }
+    break;
   case undefined:
     interactiveFlow().catch((err) => {
       console.error(err);
@@ -1192,10 +1421,12 @@ switch (subcommand) {
   ${pc.bold(pc.cyan("claudet"))} — Worktree management + Claude launcher
 
   ${pc.dim("Usage:")}
-    claudet               Interactive: select repo → worktree → start claude
-    claudet clean          Select worktrees to archive
-    claudet statusline     Output status line (reads JSON from stdin)
-    claudet --help         Show this help
+    claudet                  Interactive: select repo → worktree → start claude
+    claudet clean            Select worktrees to archive
+    claudet statusline       Output status line (reads JSON from stdin)
+    claudet worklog start    Log session start (called by hook)
+    claudet worklog tick     Log tick + update time (called by hook)
+    claudet --help           Show this help
 `);
     process.exit(subcommand === "--help" || subcommand === "-h" ? 0 : 1);
 }
