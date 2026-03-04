@@ -970,7 +970,7 @@ function launchClaude(cwd: string, planPath?: string): void {
   p.outro(pc.dim(`Launching claude in ${cwd}`));
   const args: string[] = [];
   if (planPath) {
-    args.push("--prompt", `Read the plan file at ${planPath} and begin.`);
+    args.push(`Read the plan file at ${planPath} and begin.`);
   }
   const child = spawn("claude", args, {
     cwd,
