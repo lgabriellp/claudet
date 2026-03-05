@@ -1141,20 +1141,22 @@ async function pickRepo(
   }
 
   const ADD_NEW = "__add_new_repo__";
+  const options = [
+    ...repos.map((r) => ({
+      value: r.slug,
+      label: `${basename(dirname(r.repoRoot))}/${basename(r.repoRoot)}`,
+      hint: r.repoRoot,
+    })),
+    {
+      value: ADD_NEW,
+      label: pc.green("+ Add new repository"),
+      hint: "",
+    },
+  ];
   const selected = await p.select({
     message: "Select repository",
-    options: [
-      ...repos.map((r) => ({
-        value: r.slug,
-        label: `${basename(dirname(r.repoRoot))}/${basename(r.repoRoot)}`,
-        hint: r.repoRoot,
-      })),
-      {
-        value: ADD_NEW,
-        label: pc.green("+ Add new repository"),
-        hint: "",
-      },
-    ],
+    options,
+    maxItems: options.length,
   });
   if (cancelled(selected)) bail("Cancelled.");
 
@@ -1217,9 +1219,16 @@ async function promptManualRepoPath(
   });
   if (cancelled(input)) bail("Cancelled.");
   const root = resolve(expandHome((input as string).trim()));
-  if (!existsSync(root)) bail(`Path does not exist: ${root}`);
 
-  if (!existsSync(join(root, ".git"))) {
+  if (!existsSync(root)) {
+    const shouldCreate = await p.confirm({
+      message: `Path does not exist. Create ${root} and initialize git?`,
+    });
+    if (cancelled(shouldCreate) || !shouldCreate) bail("Cancelled.");
+    mkdirSync(root, { recursive: true });
+    execSync("git init", { cwd: root, stdio: "ignore" });
+    p.log.success(`Created and initialized git repo at ${root}`);
+  } else if (!existsSync(join(root, ".git"))) {
     const shouldInit = await p.confirm({
       message: "Not a git repo. Initialize with git init?",
     });
