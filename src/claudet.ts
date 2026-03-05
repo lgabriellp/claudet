@@ -1366,6 +1366,10 @@ async function createNewWorktreeFlow(
   const projectConfig = loadProjectConfig(repoRoot);
   const defaultTarget = projectConfig.defaultTarget || "dev";
 
+  // Get local branches for target selection
+  const branchSummary = await git(repoRoot).branchLocal();
+  const localBranches = branchSummary.all;
+
   const result = await p.group(
     {
       branch: () =>
@@ -1374,12 +1378,28 @@ async function createNewWorktreeFlow(
           placeholder: "feat/new-feature",
           validate: (v) => (!v ? "Branch name is required" : undefined),
         }),
-      target: () =>
-        p.text({
+      target: () => {
+        if (localBranches.length === 0) {
+          return p.text({
+            message: "Target branch (no local branches found)",
+            placeholder: defaultTarget,
+            initialValue: defaultTarget,
+          });
+        }
+        const defaultIdx = localBranches.indexOf(defaultTarget);
+        const sorted = defaultIdx >= 0
+          ? [defaultTarget, ...localBranches.filter((b) => b !== defaultTarget)]
+          : localBranches;
+        return p.select({
           message: "Target branch",
-          placeholder: defaultTarget,
-          initialValue: defaultTarget,
-        }),
+          options: sorted.map((b) => ({
+            value: b,
+            label: b,
+            hint: b === branchSummary.current ? "current" : undefined,
+          })),
+          maxItems: sorted.length,
+        });
+      },
       ticket: () =>
         p.text({
           message: "Issue tracker ticket",
