@@ -140,6 +140,20 @@ export function getStatusFromPlan(content: string): string {
   return match ? match[1].trim() : "unknown";
 }
 
+// ---------------------------------------------------------------------------
+// Date comparator
+// ---------------------------------------------------------------------------
+
+export function compareDatesDesc(
+  a: string | undefined | null,
+  b: string | undefined | null,
+): number {
+  if (a && b) return new Date(b).getTime() - new Date(a).getTime();
+  if (a) return -1;
+  if (b) return 1;
+  return 0;
+}
+
 export function getLastProgress(content: string): string | null {
   const progressSection = content.split("## Progress")[1];
   if (!progressSection) return null;

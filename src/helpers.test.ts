@@ -9,6 +9,7 @@ import {
   parseCreateFlags,
   formatDuration,
   parseDuration,
+  compareDatesDesc,
   getStatusFromPlan,
   getLastProgress,
 } from "./helpers.js";
@@ -261,6 +262,47 @@ describe("parseDuration", () => {
 describe("formatDuration / parseDuration round-trip", () => {
   it.each([60_000, 3_600_000, 5_400_000, 5000])("round-trips %i ms", (ms) => {
     expect(parseDuration(formatDuration(ms))).toBe(ms);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// compareDatesDesc
+// ---------------------------------------------------------------------------
+
+describe("compareDatesDesc", () => {
+  it("sorts more recent date first (returns negative)", () => {
+    expect(compareDatesDesc("2026-03-05T12:00:00Z", "2026-03-01T12:00:00Z")).toBeLessThan(0);
+  });
+
+  it("sorts older date second (returns positive)", () => {
+    expect(compareDatesDesc("2026-03-01T12:00:00Z", "2026-03-05T12:00:00Z")).toBeGreaterThan(0);
+  });
+
+  it("returns 0 for identical dates", () => {
+    expect(compareDatesDesc("2026-03-05T12:00:00Z", "2026-03-05T12:00:00Z")).toBe(0);
+  });
+
+  it("sorts defined before undefined", () => {
+    expect(compareDatesDesc("2026-03-05T12:00:00Z", undefined)).toBeLessThan(0);
+  });
+
+  it("returns 0 when both undefined", () => {
+    expect(compareDatesDesc(undefined, undefined)).toBe(0);
+  });
+
+  it("sorts null after defined", () => {
+    expect(compareDatesDesc(null, "2026-03-05T12:00:00Z")).toBeGreaterThan(0);
+  });
+
+  it("sorts array of objects with mixed dates correctly", () => {
+    const items = [
+      { name: "old", date: "2026-01-01T00:00:00Z" },
+      { name: "none", date: undefined as string | undefined },
+      { name: "recent", date: "2026-03-05T00:00:00Z" },
+      { name: "mid", date: "2026-02-15T00:00:00Z" },
+    ];
+    items.sort((a, b) => compareDatesDesc(a.date, b.date));
+    expect(items.map((i) => i.name)).toEqual(["recent", "mid", "old", "none"]);
   });
 });
 

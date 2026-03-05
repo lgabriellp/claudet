@@ -25,6 +25,7 @@ import {
   parseCreateFlags,
   formatDuration,
   parseDuration,
+  compareDatesDesc,
   getStatusFromPlan as getStatusFromPlanContent,
   getLastProgress as getLastProgressContent,
   type CreateFlags,
@@ -154,6 +155,7 @@ interface WorktreeEntry {
   branch: string;
   target: string;
   archivedAt: string | null;
+  lastAccessedAt?: string;
 }
 
 interface WorktreesData {
@@ -163,6 +165,7 @@ interface WorktreesData {
 interface RepoMeta {
   repoRoot: string;
   registeredAt: string;
+  lastAccessedAt?: string;
 }
 
 interface PRStatus {
@@ -246,6 +249,34 @@ function saveWorktrees(
   const dir = dirname(wtPath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   writeFileSync(wtPath, JSON.stringify(data, null, 2) + "\n");
+}
+
+function saveMeta(dataDir: string, slug: string, meta: RepoMeta): void {
+  writeFileSync(metaJsonPath(dataDir, slug), JSON.stringify(meta, null, 2) + "\n");
+}
+
+function touchLastAccessed(
+  dataDir: string,
+  slug: string,
+  worktreeName?: string,
+): void {
+  const now = new Date().toISOString();
+
+  // Update repo meta
+  const meta = loadRepoMeta(dataDir, slug);
+  if (meta) {
+    meta.lastAccessedAt = now;
+    saveMeta(dataDir, slug, meta);
+  }
+
+  // Update worktree entry
+  if (worktreeName) {
+    const data = loadWorktrees(dataDir, slug);
+    if (data.worktrees[worktreeName]) {
+      data.worktrees[worktreeName].lastAccessedAt = now;
+      saveWorktrees(dataDir, slug, data);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1077,42 +1108,62 @@ async function pickRepo(
 ): Promise<{ slug: string; repoRoot: string }> {
   const slugs = loadRepoSlugs(dataDir);
   const repos = slugs
-    .map((slug) => ({ slug, repoRoot: getRepoRoot(dataDir, slug) }))
+    .map((slug) => {
+      const meta = loadRepoMeta(dataDir, slug);
+      return { slug, repoRoot: meta?.repoRoot ?? null, meta };
+    })
     .filter(
-      (r): r is { slug: string; repoRoot: string } =>
-        r.repoRoot !== null && existsSync(r.repoRoot),
+      (r): r is { slug: string; repoRoot: string; meta: RepoMeta } =>
+        r.repoRoot !== null && existsSync(r.repoRoot!),
+    )
+    .sort((a, b) =>
+      compareDatesDesc(
+        a.meta.lastAccessedAt ?? a.meta.registeredAt,
+        b.meta.lastAccessedAt ?? b.meta.registeredAt,
+      ),
     );
 
   if (repos.length === 0) {
-    const input = await p.text({
-      message: "Enter path to git repository",
-      placeholder: "~/repos/my-project",
-    });
-    if (cancelled(input)) bail("Cancelled.");
-    const root = resolve(expandHome((input as string).trim()));
-    if (!existsSync(root)) bail(`Path does not exist: ${root}`);
-    const slug = registerRepo(dataDir, root);
-    return { slug, repoRoot: root };
+    return promptAndRegisterRepo(dataDir);
   }
 
-  if (repos.length === 1) {
-    const { slug, repoRoot } = repos[0];
-    p.log.step(
-      `Repository: ${pc.cyan(basename(dirname(repoRoot)) + "/" + basename(repoRoot))}`,
-    );
-    return { slug, repoRoot };
-  }
-
+  const ADD_NEW = "__add_new_repo__";
   const selected = await p.select({
     message: "Select repository",
-    options: repos.map((r) => ({
-      value: r.slug,
-      label: `${basename(dirname(r.repoRoot))}/${basename(r.repoRoot)}`,
-      hint: r.repoRoot,
-    })),
+    options: [
+      ...repos.map((r) => ({
+        value: r.slug,
+        label: `${basename(dirname(r.repoRoot))}/${basename(r.repoRoot)}`,
+        hint: r.repoRoot,
+      })),
+      {
+        value: ADD_NEW,
+        label: pc.green("+ Add new repository"),
+        hint: "",
+      },
+    ],
   });
   if (cancelled(selected)) bail("Cancelled.");
+
+  if (selected === ADD_NEW) {
+    return promptAndRegisterRepo(dataDir);
+  }
+
   return repos.find((r) => r.slug === (selected as string))!;
+}
+
+async function promptAndRegisterRepo(
+  dataDir: string,
+): Promise<{ slug: string; repoRoot: string }> {
+  const input = await p.text({
+    message: "Enter path to git repository",
+    placeholder: "~/repos/my-project",
+  });
+  if (cancelled(input)) bail("Cancelled.");
+  const root = resolve(expandHome((input as string).trim()));
+  if (!existsSync(root)) bail(`Path does not exist: ${root}`);
+  const slug = registerRepo(dataDir, root);
+  return { slug, repoRoot: root };
 }
 
 async function interactiveFlow(): Promise<void> {
@@ -1130,9 +1181,11 @@ async function interactiveFlow(): Promise<void> {
   ).length;
   s.stop(activeCount > 0 ? "Worktrees loaded." : "No active worktrees found.");
 
-  const activeEntries = Object.entries(data.worktrees).filter(
-    ([name, entry]) => !entry.archivedAt && !isSmokeTestWorktree(name),
-  );
+  const activeEntries = Object.entries(data.worktrees)
+    .filter(
+      ([name, entry]) => !entry.archivedAt && !isSmokeTestWorktree(name),
+    )
+    .sort(([, a], [, b]) => compareDatesDesc(a.lastAccessedAt, b.lastAccessedAt));
 
   if (activeEntries.length === 0) {
     const shouldCreate = await p.confirm({
@@ -1216,6 +1269,7 @@ async function interactiveFlow(): Promise<void> {
     }
   }
 
+  touchLastAccessed(dataDir, slug, selectedName);
   launchClaude(selectedWtPath, pPath);
 }
 
@@ -1282,6 +1336,7 @@ async function createNewWorktreeFlow(
     await pushAndCreateDraftPR(wtPath, branch, target);
   }
 
+  touchLastAccessed(dataDir, slug, shortName);
   launchClaude(wtPath, planPath);
 }
 
