@@ -1141,20 +1141,22 @@ async function pickRepo(
   }
 
   const ADD_NEW = "__add_new_repo__";
+  const options = [
+    ...repos.map((r) => ({
+      value: r.slug,
+      label: `${basename(dirname(r.repoRoot))}/${basename(r.repoRoot)}`,
+      hint: r.repoRoot,
+    })),
+    {
+      value: ADD_NEW,
+      label: pc.green("+ Add new repository"),
+      hint: "",
+    },
+  ];
   const selected = await p.select({
     message: "Select repository",
-    options: [
-      ...repos.map((r) => ({
-        value: r.slug,
-        label: `${basename(dirname(r.repoRoot))}/${basename(r.repoRoot)}`,
-        hint: r.repoRoot,
-      })),
-      {
-        value: ADD_NEW,
-        label: pc.green("+ Add new repository"),
-        hint: "",
-      },
-    ],
+    options,
+    maxItems: options.length,
   });
   if (cancelled(selected)) bail("Cancelled.");
 
