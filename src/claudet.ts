@@ -28,6 +28,7 @@ import {
   compareDatesDesc,
   getStatusFromPlan as getStatusFromPlanContent,
   getLastProgress as getLastProgressContent,
+  scanForGitRepos,
   type CreateFlags,
 } from "./helpers.js";
 
@@ -79,6 +80,24 @@ interface ProjectConfig {
   setup?: string[];
 }
 
+interface GlobalConfig {
+  dataDir?: string;
+  scanDirs?: string[];
+}
+
+const GLOBAL_CONFIG_PATH = resolve(HOME, ".claudet", "config.json");
+
+function loadGlobalConfig(): GlobalConfig {
+  if (!existsSync(GLOBAL_CONFIG_PATH)) return {};
+  return tryParseJson<GlobalConfig>(tryReadFileSync(GLOBAL_CONFIG_PATH), {});
+}
+
+function saveGlobalConfig(config: GlobalConfig): void {
+  const dir = dirname(GLOBAL_CONFIG_PATH);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(GLOBAL_CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
+}
+
 function loadProjectConfig(repoRoot: string): ProjectConfig {
   const configPath = resolve(repoRoot, ".claudet.json");
   if (!existsSync(configPath)) return {};
@@ -100,15 +119,9 @@ function resolveDataDir(repoRoot?: string): string {
   }
 
   // 3. Global config
-  const globalConfigPath = resolve(HOME, ".config", "claudet", "config.json");
-  if (existsSync(globalConfigPath)) {
-    const config = tryParseJson<{ dataDir?: string }>(
-      tryReadFileSync(globalConfigPath),
-      {},
-    );
-    if (config.dataDir) {
-      return resolve(expandHome(config.dataDir));
-    }
+  const globalConfig = loadGlobalConfig();
+  if (globalConfig.dataDir) {
+    return resolve(expandHome(globalConfig.dataDir));
   }
 
   // 4. Default
@@ -1155,6 +1168,49 @@ async function pickRepo(
 async function promptAndRegisterRepo(
   dataDir: string,
 ): Promise<{ slug: string; repoRoot: string }> {
+  const globalConfig = loadGlobalConfig();
+  const scanDirs = globalConfig.scanDirs ?? ["~/repos"];
+  const discovered = scanForGitRepos(scanDirs);
+
+  // Filter out already-registered repos
+  const slugs = loadRepoSlugs(dataDir);
+  const registeredRoots = new Set(
+    slugs.map((s) => getRepoRoot(dataDir, s)).filter(Boolean),
+  );
+  const unregistered = discovered.filter((d) => !registeredRoots.has(d));
+
+  if (unregistered.length > 0) {
+    const MANUAL = "__manual__";
+    const selected = await p.select({
+      message: "Select a repository to add",
+      options: [
+        ...unregistered.map((r) => ({
+          value: r,
+          label: `${basename(dirname(r))}/${basename(r)}`,
+          hint: r,
+        })),
+        {
+          value: MANUAL,
+          label: pc.dim("Enter path manually"),
+          hint: "",
+        },
+      ],
+    });
+    if (cancelled(selected)) bail("Cancelled.");
+
+    if (selected !== MANUAL) {
+      const root = selected as string;
+      const slug = registerRepo(dataDir, root);
+      return { slug, repoRoot: root };
+    }
+  }
+
+  return promptManualRepoPath(dataDir);
+}
+
+async function promptManualRepoPath(
+  dataDir: string,
+): Promise<{ slug: string; repoRoot: string }> {
   const input = await p.text({
     message: "Enter path to git repository",
     placeholder: "~/repos/my-project",
@@ -1162,12 +1218,28 @@ async function promptAndRegisterRepo(
   if (cancelled(input)) bail("Cancelled.");
   const root = resolve(expandHome((input as string).trim()));
   if (!existsSync(root)) bail(`Path does not exist: ${root}`);
+
+  if (!existsSync(join(root, ".git"))) {
+    const shouldInit = await p.confirm({
+      message: "Not a git repo. Initialize with git init?",
+    });
+    if (cancelled(shouldInit) || !shouldInit) bail("Cancelled.");
+    execSync("git init", { cwd: root, stdio: "ignore" });
+    p.log.success(`Initialized git repo at ${root}`);
+  }
+
   const slug = registerRepo(dataDir, root);
   return { slug, repoRoot: root };
 }
 
 async function interactiveFlow(): Promise<void> {
   p.intro(`${pc.bold(pc.cyan("claudet"))} ${pc.dim(`v${PKG_VERSION}`)}`);
+
+  if (!existsSync(GLOBAL_CONFIG_PATH)) {
+    p.log.info("First run — let's configure claudet.");
+    await runInitSetup();
+    p.log.success("Configuration saved.");
+  }
 
   const dataDir = resolveDataDir();
 
@@ -1614,12 +1686,73 @@ async function statusLine(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Init command
+// ---------------------------------------------------------------------------
+
+async function runInitSetup(): Promise<void> {
+  const existing = loadGlobalConfig();
+
+  const scanDirsInput = await p.text({
+    message: "Directories to scan for git repos (comma-separated)",
+    placeholder: "~/repos, ~/work",
+    defaultValue: existing.scanDirs?.join(", ") || "~/repos",
+    initialValue: existing.scanDirs?.join(", ") || "",
+  });
+  if (cancelled(scanDirsInput)) bail("Cancelled.");
+
+  const dataDirInput = await p.text({
+    message: "Data directory for claudet",
+    placeholder: "~/.claudet",
+    defaultValue: existing.dataDir || "~/.claudet",
+    initialValue: existing.dataDir || "",
+  });
+  if (cancelled(dataDirInput)) bail("Cancelled.");
+
+  const scanDirs = (scanDirsInput as string)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const dataDir = (dataDirInput as string).trim() || "~/.claudet";
+
+  const config: GlobalConfig = { scanDirs };
+  if (dataDir !== "~/.claudet") {
+    config.dataDir = dataDir;
+  }
+
+  p.note(
+    [
+      `${pc.dim("Scan dirs")}  ${scanDirs.join(", ")}`,
+      `${pc.dim("Data dir")}   ${dataDir}`,
+      `${pc.dim("Config")}     ${GLOBAL_CONFIG_PATH}`,
+    ].join("\n"),
+    "Settings",
+  );
+
+  const confirmed = await p.confirm({ message: "Save?" });
+  if (cancelled(confirmed) || !confirmed) bail("Cancelled.");
+
+  saveGlobalConfig(config);
+}
+
+async function initCommand(): Promise<void> {
+  p.intro(`${pc.bold(pc.cyan("claudet init"))} — Configure global settings`);
+  await runInitSetup();
+  p.outro("Configuration saved.");
+}
+
+// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
 const [subcommand, subArg] = process.argv.slice(2);
 
 switch (subcommand) {
+  case "init":
+    initCommand().catch((err) => {
+      console.error(err);
+      process.exit(1);
+    });
+    break;
   case "create":
     createCommand().catch((err) => {
       console.log(
@@ -1675,6 +1808,7 @@ switch (subcommand) {
 
   ${pc.dim("Usage:")}
     claudet                  Interactive: select repo → worktree → start claude
+    claudet init             Configure global settings (scan dirs, data dir)
     claudet create           Non-interactive: create worktree + plan (JSON output)
     claudet clean            Select worktrees to archive
     claudet statusline       Output status line (reads JSON from stdin)

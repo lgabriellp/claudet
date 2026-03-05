@@ -83,7 +83,8 @@ export function toMergeableStatus(
 // Path derivation
 // ---------------------------------------------------------------------------
 
-import { basename, dirname } from "path";
+import { existsSync, readdirSync, statSync } from "fs";
+import { basename, dirname, join, resolve } from "path";
 
 export function deriveRepoSlug(repoRoot: string): string {
   return `${basename(dirname(repoRoot))}--${basename(repoRoot)}`;
@@ -161,4 +162,47 @@ export function getLastProgress(content: string): string | null {
     .split("\n")
     .filter((l) => l.startsWith("- ") && !l.startsWith("<!-- "));
   return lines.length > 0 ? lines[lines.length - 1].replace(/^- /, "") : null;
+}
+
+// ---------------------------------------------------------------------------
+// Git repo discovery
+// ---------------------------------------------------------------------------
+
+export function scanForGitRepos(
+  scanDirs: string[],
+  maxDepth = 2,
+): string[] {
+  const found = new Set<string>();
+
+  function walk(dir: string, depth: number): void {
+    if (depth > maxDepth) return;
+    try {
+      if (existsSync(join(dir, ".git"))) {
+        found.add(resolve(dir));
+        return; // stop descending into discovered repos
+      }
+      if (depth === maxDepth) return;
+      const entries = readdirSync(dir);
+      for (const entry of entries) {
+        if (entry.startsWith(".")) continue; // skip hidden dirs
+        const full = join(dir, entry);
+        try {
+          if (statSync(full).isDirectory()) {
+            walk(full, depth + 1);
+          }
+        } catch {
+          // permission error — skip
+        }
+      }
+    } catch {
+      // non-existent or unreadable dir — skip
+    }
+  }
+
+  for (const raw of scanDirs) {
+    const dir = expandHome(raw);
+    walk(dir, 0);
+  }
+
+  return [...found].sort();
 }

@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, mkdirSync, rmSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 import {
   tryParseJson,
   expandHome,
@@ -12,6 +15,7 @@ import {
   compareDatesDesc,
   getStatusFromPlan,
   getLastProgress,
+  scanForGitRepos,
 } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -357,5 +361,73 @@ describe("getLastProgress", () => {
   it("returns null when only comments exist", () => {
     const content = "## Progress\n<!-- Append-only log -->\n";
     expect(getLastProgress(content)).toBe(null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// scanForGitRepos
+// ---------------------------------------------------------------------------
+
+describe("scanForGitRepos", () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "scantest-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("finds repos at depth 1", () => {
+    mkdirSync(join(tmp, "my-repo", ".git"), { recursive: true });
+    const result = scanForGitRepos([tmp]);
+    expect(result).toEqual([join(tmp, "my-repo")]);
+  });
+
+  it("finds repos at depth 2", () => {
+    mkdirSync(join(tmp, "org", "my-repo", ".git"), { recursive: true });
+    const result = scanForGitRepos([tmp]);
+    expect(result).toEqual([join(tmp, "org", "my-repo")]);
+  });
+
+  it("respects maxDepth", () => {
+    mkdirSync(join(tmp, "a", "b", "c", ".git"), { recursive: true });
+    expect(scanForGitRepos([tmp], 2)).toEqual([]);
+    expect(scanForGitRepos([tmp], 3)).toEqual([join(tmp, "a", "b", "c")]);
+  });
+
+  it("skips hidden dirs", () => {
+    mkdirSync(join(tmp, ".hidden", ".git"), { recursive: true });
+    const result = scanForGitRepos([tmp]);
+    expect(result).toEqual([]);
+  });
+
+  it("deduplicates when same repo found via two scan dirs", () => {
+    mkdirSync(join(tmp, "my-repo", ".git"), { recursive: true });
+    const result = scanForGitRepos([tmp, tmp]);
+    expect(result).toEqual([join(tmp, "my-repo")]);
+  });
+
+  it("skips non-existent scan dirs without error", () => {
+    const result = scanForGitRepos([join(tmp, "does-not-exist")]);
+    expect(result).toEqual([]);
+  });
+
+  it("stops descending at .git (no repos-in-repos)", () => {
+    mkdirSync(join(tmp, "outer", ".git"), { recursive: true });
+    mkdirSync(join(tmp, "outer", "inner", ".git"), { recursive: true });
+    const result = scanForGitRepos([tmp]);
+    expect(result).toEqual([join(tmp, "outer")]);
+  });
+
+  it("returns sorted results", () => {
+    mkdirSync(join(tmp, "z-repo", ".git"), { recursive: true });
+    mkdirSync(join(tmp, "a-repo", ".git"), { recursive: true });
+    const result = scanForGitRepos([tmp]);
+    expect(result).toEqual([
+      join(tmp, "a-repo"),
+      join(tmp, "z-repo"),
+    ]);
   });
 });
