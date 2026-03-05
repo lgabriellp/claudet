@@ -1269,10 +1269,6 @@ async function interactiveFlow(): Promise<void> {
     .sort(([, a], [, b]) => compareDatesDesc(a.lastAccessedAt, b.lastAccessedAt));
 
   if (activeEntries.length === 0) {
-    const shouldCreate = await p.confirm({
-      message: "Create a new worktree?",
-    });
-    if (cancelled(shouldCreate) || !shouldCreate) bail("Cancelled.");
     await createNewWorktreeFlow(dataDir, slug, repoRoot);
     return;
   }
