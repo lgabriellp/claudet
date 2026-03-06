@@ -83,7 +83,7 @@ export function toMergeableStatus(
 // Path derivation
 // ---------------------------------------------------------------------------
 
-import { existsSync, readdirSync, statSync } from "fs";
+import { existsSync, readdirSync, statSync, unlinkSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
 
 export function deriveRepoSlug(repoRoot: string): string {
@@ -220,4 +220,95 @@ export function validateBranchName(name: string): string | undefined {
   if (/[~^:\\?*\[\]@{]/.test(name))
     return "Branch name contains invalid characters";
   return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Stale session file cleanup
+// ---------------------------------------------------------------------------
+
+export function cleanStaleSessionFiles(tmpDir: string): void {
+  const prefix = "claudet-worklog-";
+  try {
+    for (const entry of readdirSync(tmpDir)) {
+      if (!entry.startsWith(prefix) || !entry.endsWith(".json")) continue;
+      const filePath = join(tmpDir, entry);
+      try {
+        const stats = statSync(filePath);
+        if (Date.now() - stats.mtimeMs > 24 * 60 * 60 * 1000) {
+          unlinkSync(filePath);
+        }
+      } catch {
+        // file vanished — skip
+      }
+    }
+  } catch {
+    // unreadable directory — skip
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Repo slug loading
+// ---------------------------------------------------------------------------
+
+export function loadRepoSlugs(dataDir: string): string[] {
+  const reposDir = resolve(dataDir, "repos");
+  if (!existsSync(reposDir)) return [];
+  return readdirSync(reposDir).filter((entry) => {
+    const entryPath = resolve(reposDir, entry);
+    try {
+      return (
+        statSync(entryPath).isDirectory() &&
+        existsSync(resolve(reposDir, entry, "meta.json"))
+      );
+    } catch {
+      return false;
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Worklog hooks merge logic
+// ---------------------------------------------------------------------------
+
+export interface HookDefinition {
+  type: string;
+  command: string;
+  timeout: number;
+}
+
+export interface HookMatcher {
+  hooks?: HookDefinition[];
+  [key: string]: unknown;
+}
+
+export function mergeWorklogHooks(
+  settings: Record<string, HookMatcher[]>,
+): { settings: Record<string, HookMatcher[]>; changed: boolean } {
+  const requiredHooks: Record<string, HookDefinition> = {
+    SessionStart: {
+      type: "command",
+      command: "claudet worklog start",
+      timeout: 10,
+    },
+    Stop: { type: "command", command: "claudet worklog tick", timeout: 10 },
+  };
+
+  let changed = false;
+
+  for (const [event, hookDef] of Object.entries(requiredHooks)) {
+    const existing: HookMatcher[] = settings[event] || [];
+    const hasOurHook = existing.some((matcher) =>
+      (matcher.hooks || []).some(
+        (h) => h.type === "command" && h.command === hookDef.command,
+      ),
+    );
+
+    if (!hasOurHook) {
+      existing.push({ hooks: [hookDef] });
+      settings[event] = existing;
+      changed = true;
+    }
+  }
+
+  return { settings, changed };
 }

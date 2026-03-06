@@ -12,6 +12,7 @@ import {
 } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
+import { tmpdir } from "os";
 import * as p from "@clack/prompts";
 import pc from "picocolors";
 import simpleGit, { type SimpleGit } from "simple-git";
@@ -31,7 +32,12 @@ import {
   getLastProgress as getLastProgressContent,
   scanForGitRepos,
   validateBranchName,
+  cleanStaleSessionFiles,
+  loadRepoSlugs,
+  mergeWorklogHooks,
   type CreateFlags,
+  type HookDefinition,
+  type HookMatcher,
 } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -215,17 +221,6 @@ interface SessionState {
   lastTick: number;
 }
 
-interface HookDefinition {
-  type: string;
-  command: string;
-  timeout: number;
-}
-
-interface HookMatcher {
-  hooks?: HookDefinition[];
-  [key: string]: unknown;
-}
-
 interface PRStatus {
   state: "OPEN" | "MERGED" | "CLOSED";
   url: string;
@@ -241,22 +236,6 @@ interface RepoInfo {
 // ---------------------------------------------------------------------------
 // Repo registry (directory-based)
 // ---------------------------------------------------------------------------
-
-function loadRepoSlugs(dataDir: string): string[] {
-  const reposDir = resolve(dataDir, "repos");
-  if (!existsSync(reposDir)) return [];
-  return readdirSync(reposDir).filter((entry) => {
-    const entryPath = resolve(reposDir, entry);
-    try {
-      return (
-        statSync(entryPath).isDirectory() &&
-        existsSync(metaJsonPath(dataDir, entry))
-      );
-    } catch {
-      return false;
-    }
-  });
-}
 
 function loadRepoMeta(dataDir: string, slug: string): RepoMeta | null {
   const mPath = metaJsonPath(dataDir, slug);
@@ -667,27 +646,6 @@ function appendWorklog(dataDir: string, event: Record<string, unknown>): void {
 
 function sessionStatePath(sessionId: string): string {
   return join("/tmp", `claudet-worklog-${sessionId}.json`);
-}
-
-function cleanStaleSessionFiles(): void {
-  const prefix = "claudet-worklog-";
-  const tmpDir = "/tmp";
-  try {
-    for (const entry of readdirSync(tmpDir)) {
-      if (!entry.startsWith(prefix) || !entry.endsWith(".json")) continue;
-      const filePath = join(tmpDir, entry);
-      try {
-        const stats = statSync(filePath);
-        if (Date.now() - stats.mtimeMs > 24 * 60 * 60 * 1000) {
-          unlinkSync(filePath);
-        }
-      } catch {
-        // file vanished — skip
-      }
-    }
-  } catch {
-    // /tmp unreadable — skip
-  }
 }
 
 function updatePlanTimeTracked(pPath: string, addMs: number): void {
@@ -1380,7 +1338,7 @@ async function interactiveFlow(): Promise<void> {
   }
 
   const dataDir = resolveDataDir();
-  cleanStaleSessionFiles();
+  cleanStaleSessionFiles(tmpdir());
 
   const { slug, repoRoot } = await pickRepo(dataDir);
 
