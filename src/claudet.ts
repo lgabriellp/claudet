@@ -88,7 +88,6 @@ function tryReadFileSync(filePath: string, fallback = ""): string {
   }
 }
 
-
 // ---------------------------------------------------------------------------
 // Configuration & path resolution
 // ---------------------------------------------------------------------------
@@ -312,7 +311,10 @@ function saveWorktrees(
 }
 
 function saveMeta(dataDir: string, slug: string, meta: RepoMeta): void {
-  writeFileSync(metaJsonPath(dataDir, slug), JSON.stringify(meta, null, 2) + "\n");
+  writeFileSync(
+    metaJsonPath(dataDir, slug),
+    JSON.stringify(meta, null, 2) + "\n",
+  );
 }
 
 // Race condition note: concurrent writes to meta/worktrees are acceptable
@@ -566,9 +568,7 @@ async function fetchPRStatuses(
     })
     .then((r) => r.data)
     .catch((err) => {
-      onPhase?.(
-        `PR fetch failed: ${err instanceof Error ? err.message : err}`,
-      );
+      onPhase?.(`PR fetch failed: ${err instanceof Error ? err.message : err}`);
       return null;
     });
 
@@ -1351,10 +1351,10 @@ async function interactiveFlow(): Promise<void> {
   s.stop(activeCount > 0 ? "Worktrees loaded." : "No active worktrees found.");
 
   const activeEntries = Object.entries(data.worktrees)
-    .filter(
-      ([name, entry]) => !entry.archivedAt && !isSmokeTestWorktree(name),
-    )
-    .sort(([, a], [, b]) => compareDatesDesc(a.lastAccessedAt, b.lastAccessedAt));
+    .filter(([name, entry]) => !entry.archivedAt && !isSmokeTestWorktree(name))
+    .sort(([, a], [, b]) =>
+      compareDatesDesc(a.lastAccessedAt, b.lastAccessedAt),
+    );
 
   if (activeEntries.length === 0) {
     await createNewWorktreeFlow(dataDir, slug, repoRoot);
@@ -1449,17 +1449,17 @@ async function createNewWorktreeFlow(
 ): Promise<void> {
   const projectConfig = loadProjectConfig(dataDir, slug);
   const globalConfig = loadGlobalConfig();
-  const defaultTarget = projectConfig.defaultTarget || globalConfig.defaultTarget || "dev";
+  const defaultTarget =
+    projectConfig.defaultTarget || globalConfig.defaultTarget || "dev";
 
   // Get local branches for target selection
   let branchSummary = await git(repoRoot).branchLocal();
   if (branchSummary.all.length === 0) {
     // Fresh repo with no commits — create initial commit so branches exist
-    execFileSync(
-      "git",
-      ["commit", "--allow-empty", "-m", "Initial commit"],
-      { cwd: repoRoot, stdio: "ignore" },
-    );
+    execFileSync("git", ["commit", "--allow-empty", "-m", "Initial commit"], {
+      cwd: repoRoot,
+      stdio: "ignore",
+    });
     branchSummary = await git(repoRoot).branchLocal();
     p.log.info(`Created initial commit on ${branchSummary.current || "main"}`);
   }
@@ -1475,9 +1475,13 @@ async function createNewWorktreeFlow(
         }),
       target: () => {
         const defaultIdx = localBranches.indexOf(defaultTarget);
-        const sorted = defaultIdx >= 0
-          ? [defaultTarget, ...localBranches.filter((b) => b !== defaultTarget)]
-          : localBranches;
+        const sorted =
+          defaultIdx >= 0
+            ? [
+                defaultTarget,
+                ...localBranches.filter((b) => b !== defaultTarget),
+              ]
+            : localBranches;
         return p.select({
           message: "Target branch",
           options: sorted.map((b) => ({
@@ -1551,7 +1555,11 @@ async function createCommand(): Promise<void> {
   const slug = registerRepo(dataDir, repoRoot);
   const projectConfig = loadProjectConfig(dataDir, slug);
   const globalConfig = loadGlobalConfig();
-  const target = flags.target || projectConfig.defaultTarget || globalConfig.defaultTarget || "dev";
+  const target =
+    flags.target ||
+    projectConfig.defaultTarget ||
+    globalConfig.defaultTarget ||
+    "dev";
   const shortName = deriveShortName(flags.branch);
 
   // Pre-validate
@@ -1857,7 +1865,8 @@ async function runInitSetup(): Promise<void> {
     .filter(Boolean);
   const dataDir = (dataDirInput as string).trim() || "~/.claudet";
 
-  const highPriorityTarget = (highPriorityTargetInput as string).trim() || "main";
+  const highPriorityTarget =
+    (highPriorityTargetInput as string).trim() || "main";
   const defaultTarget = (defaultTargetInput as string).trim() || "dev";
 
   const config: GlobalConfig = { scanDirs };

@@ -107,9 +107,7 @@ describe("deriveRepoSlug", () => {
   });
 
   it("derives slug from nested path", () => {
-    expect(deriveRepoSlug("/home/user/work/org/service")).toBe(
-      "org--service",
-    );
+    expect(deriveRepoSlug("/home/user/work/org/service")).toBe("org--service");
   });
 });
 
@@ -288,15 +286,21 @@ describe("formatDuration / parseDuration round-trip", () => {
 
 describe("compareDatesDesc", () => {
   it("sorts more recent date first (returns negative)", () => {
-    expect(compareDatesDesc("2026-03-05T12:00:00Z", "2026-03-01T12:00:00Z")).toBeLessThan(0);
+    expect(
+      compareDatesDesc("2026-03-05T12:00:00Z", "2026-03-01T12:00:00Z"),
+    ).toBeLessThan(0);
   });
 
   it("sorts older date second (returns positive)", () => {
-    expect(compareDatesDesc("2026-03-01T12:00:00Z", "2026-03-05T12:00:00Z")).toBeGreaterThan(0);
+    expect(
+      compareDatesDesc("2026-03-01T12:00:00Z", "2026-03-05T12:00:00Z"),
+    ).toBeGreaterThan(0);
   });
 
   it("returns 0 for identical dates", () => {
-    expect(compareDatesDesc("2026-03-05T12:00:00Z", "2026-03-05T12:00:00Z")).toBe(0);
+    expect(
+      compareDatesDesc("2026-03-05T12:00:00Z", "2026-03-05T12:00:00Z"),
+    ).toBe(0);
   });
 
   it("sorts defined before undefined", () => {
@@ -410,9 +414,7 @@ describe("validateBranchName", () => {
   });
 
   it("rejects double dots", () => {
-    expect(validateBranchName("a..b")).toBe(
-      "Branch name cannot contain '..'",
-    );
+    expect(validateBranchName("a..b")).toBe("Branch name cannot contain '..'");
   });
 
   it("rejects spaces", () => {
@@ -513,10 +515,7 @@ describe("scanForGitRepos", () => {
     mkdirSync(join(tmp, "z-repo", ".git"), { recursive: true });
     mkdirSync(join(tmp, "a-repo", ".git"), { recursive: true });
     const result = scanForGitRepos([tmp]);
-    expect(result).toEqual([
-      join(tmp, "a-repo"),
-      join(tmp, "z-repo"),
-    ]);
+    expect(result).toEqual([join(tmp, "a-repo"), join(tmp, "z-repo")]);
   });
 });
 
@@ -717,12 +716,30 @@ describe("mergeWorklogHooks", () => {
 // ---------------------------------------------------------------------------
 
 describe("e2e smoke test", () => {
+  const projectRoot = join(import.meta.dirname!, "..");
+
   it("compiles and runs --help without error", () => {
     const result = execSync("pnpm exec tsx src/claudet.ts --help", {
-      cwd: join(import.meta.dirname!, ".."),
+      cwd: projectRoot,
       encoding: "utf-8",
       timeout: 30_000,
     });
     expect(result).toContain("claudet");
+  });
+
+  it("passes typecheck with no errors", () => {
+    execSync("pnpm typecheck", {
+      cwd: projectRoot,
+      encoding: "utf-8",
+      timeout: 60_000,
+    });
+  });
+
+  it("passes format check", () => {
+    execSync("pnpm format:check", {
+      cwd: projectRoot,
+      encoding: "utf-8",
+      timeout: 30_000,
+    });
   });
 });
