@@ -168,10 +168,7 @@ export function getLastProgress(content: string): string | null {
 // Git repo discovery
 // ---------------------------------------------------------------------------
 
-export function scanForGitRepos(
-  scanDirs: string[],
-  maxDepth = 2,
-): string[] {
+export function scanForGitRepos(scanDirs: string[], maxDepth = 2): string[] {
   const found = new Set<string>();
 
   function walk(dir: string, depth: number): void {
@@ -281,9 +278,10 @@ export interface HookMatcher {
   [key: string]: unknown;
 }
 
-export function mergeWorklogHooks(
-  settings: Record<string, HookMatcher[]>,
-): { settings: Record<string, HookMatcher[]>; changed: boolean } {
+export function mergeWorklogHooks(settings: Record<string, HookMatcher[]>): {
+  settings: Record<string, HookMatcher[]>;
+  changed: boolean;
+} {
   const requiredHooks: Record<string, HookDefinition> = {
     SessionStart: {
       type: "command",
