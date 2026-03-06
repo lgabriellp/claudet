@@ -206,3 +206,18 @@ export function scanForGitRepos(
 
   return [...found].sort();
 }
+
+// ---------------------------------------------------------------------------
+// Branch name validation
+// ---------------------------------------------------------------------------
+
+export function validateBranchName(name: string): string | undefined {
+  if (!name) return "Branch name is required";
+  if (name.startsWith("-")) return "Branch name cannot start with '-'";
+  if (name.endsWith(".lock")) return "Branch name cannot end with '.lock'";
+  if (name.includes("..")) return "Branch name cannot contain '..'";
+  if (name.includes(" ")) return "Branch name cannot contain spaces";
+  if (/[~^:\\?*\[\]@{]/.test(name))
+    return "Branch name contains invalid characters";
+  return undefined;
+}
