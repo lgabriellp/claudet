@@ -16,6 +16,7 @@ import {
   getStatusFromPlan,
   getLastProgress,
   scanForGitRepos,
+  validateBranchName,
 } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -361,6 +362,81 @@ describe("getLastProgress", () => {
   it("returns null when only comments exist", () => {
     const content = "## Progress\n<!-- Append-only log -->\n";
     expect(getLastProgress(content)).toBe(null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// scanForGitRepos
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// validateBranchName
+// ---------------------------------------------------------------------------
+
+describe("validateBranchName", () => {
+  it("accepts valid branch names", () => {
+    expect(validateBranchName("feat/new-feature")).toBeUndefined();
+    expect(validateBranchName("fix/bug-123")).toBeUndefined();
+    expect(validateBranchName("main")).toBeUndefined();
+    expect(validateBranchName("release/v2.0")).toBeUndefined();
+  });
+
+  it("rejects empty name", () => {
+    expect(validateBranchName("")).toBe("Branch name is required");
+  });
+
+  it("rejects leading dash", () => {
+    expect(validateBranchName("-bad")).toBe(
+      "Branch name cannot start with '-'",
+    );
+  });
+
+  it("rejects .lock suffix", () => {
+    expect(validateBranchName("branch.lock")).toBe(
+      "Branch name cannot end with '.lock'",
+    );
+  });
+
+  it("rejects double dots", () => {
+    expect(validateBranchName("a..b")).toBe(
+      "Branch name cannot contain '..'",
+    );
+  });
+
+  it("rejects spaces", () => {
+    expect(validateBranchName("bad name")).toBe(
+      "Branch name cannot contain spaces",
+    );
+  });
+
+  it("rejects special characters", () => {
+    expect(validateBranchName("a~b")).toBe(
+      "Branch name contains invalid characters",
+    );
+    expect(validateBranchName("a^b")).toBe(
+      "Branch name contains invalid characters",
+    );
+    expect(validateBranchName("a:b")).toBe(
+      "Branch name contains invalid characters",
+    );
+    expect(validateBranchName("a?b")).toBe(
+      "Branch name contains invalid characters",
+    );
+    expect(validateBranchName("a*b")).toBe(
+      "Branch name contains invalid characters",
+    );
+    expect(validateBranchName("a[b")).toBe(
+      "Branch name contains invalid characters",
+    );
+    expect(validateBranchName("a]b")).toBe(
+      "Branch name contains invalid characters",
+    );
+    expect(validateBranchName("a@{b")).toBe(
+      "Branch name contains invalid characters",
+    );
+    expect(validateBranchName("a\\b")).toBe(
+      "Branch name contains invalid characters",
+    );
   });
 });
 

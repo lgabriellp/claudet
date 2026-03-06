@@ -1,4 +1,4 @@
-import { execSync, spawn } from "child_process";
+import { execFileSync, execSync, spawn } from "child_process";
 import {
   appendFileSync,
   existsSync,
@@ -7,6 +7,7 @@ import {
   readdirSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "fs";
 import { basename, dirname, join, resolve } from "path";
@@ -29,6 +30,7 @@ import {
   getStatusFromPlan as getStatusFromPlanContent,
   getLastProgress as getLastProgressContent,
   scanForGitRepos,
+  validateBranchName,
   type CreateFlags,
 } from "./helpers.js";
 
@@ -37,11 +39,22 @@ import {
 // ---------------------------------------------------------------------------
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const PKG_VERSION: string = JSON.parse(
-  readFileSync(resolve(__dirname, "..", "package.json"), "utf-8"),
-).version;
+let PKG_VERSION: string;
+try {
+  PKG_VERSION = JSON.parse(
+    readFileSync(resolve(__dirname, "..", "package.json"), "utf-8"),
+  ).version;
+} catch {
+  PKG_VERSION = "unknown";
+}
 
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
+if (!HOME) {
+  console.error(
+    "Fatal: HOME (or USERPROFILE) environment variable is not set.",
+  );
+  process.exit(1);
+}
 const GLOBAL_SETTINGS_FILE = resolve(HOME, ".claude", "settings.json");
 
 // ---------------------------------------------------------------------------
@@ -75,7 +88,6 @@ function tryReadFileSync(filePath: string, fallback = ""): string {
 // ---------------------------------------------------------------------------
 
 interface ProjectConfig {
-  dataDir?: string;
   defaultTarget?: string;
   setup?: string[];
 }
@@ -83,6 +95,8 @@ interface ProjectConfig {
 interface GlobalConfig {
   dataDir?: string;
   scanDirs?: string[];
+  highPriorityTarget?: string;
+  defaultTarget?: string;
 }
 
 const GLOBAL_CONFIG_PATH = resolve(HOME, ".claudet", "config.json");
@@ -98,33 +112,40 @@ function saveGlobalConfig(config: GlobalConfig): void {
   writeFileSync(GLOBAL_CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
 }
 
-function loadProjectConfig(repoRoot: string): ProjectConfig {
-  const configPath = resolve(repoRoot, ".claudet.json");
-  if (!existsSync(configPath)) return {};
-  return tryParseJson<ProjectConfig>(tryReadFileSync(configPath), {});
+function projectConfigPath(dataDir: string, slug: string): string {
+  return resolve(dataDir, "repos", slug, "config.json");
 }
 
-function resolveDataDir(repoRoot?: string): string {
+function loadProjectConfig(dataDir: string, slug: string): ProjectConfig {
+  const cfgPath = projectConfigPath(dataDir, slug);
+  if (!existsSync(cfgPath)) return {};
+  return tryParseJson<ProjectConfig>(tryReadFileSync(cfgPath), {});
+}
+
+function saveProjectConfig(
+  dataDir: string,
+  slug: string,
+  config: ProjectConfig,
+): void {
+  const cfgPath = projectConfigPath(dataDir, slug);
+  const dir = dirname(cfgPath);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(cfgPath, JSON.stringify(config, null, 2) + "\n");
+}
+
+function resolveDataDir(): string {
   // 1. Env var (always wins)
   if (process.env.CLAUDET_DATA_DIR) {
     return resolve(expandHome(process.env.CLAUDET_DATA_DIR));
   }
 
-  // 2. Repo-level .claudet.json
-  if (repoRoot) {
-    const config = loadProjectConfig(repoRoot);
-    if (config.dataDir) {
-      return resolve(expandHome(config.dataDir));
-    }
-  }
-
-  // 3. Global config
+  // 2. Global config
   const globalConfig = loadGlobalConfig();
   if (globalConfig.dataDir) {
     return resolve(expandHome(globalConfig.dataDir));
   }
 
-  // 4. Default
+  // 3. Default
   return resolve(HOME, ".claudet");
 }
 
@@ -181,6 +202,30 @@ interface RepoMeta {
   lastAccessedAt?: string;
 }
 
+interface WorklogInput {
+  session_id?: string;
+  cwd?: string;
+}
+
+interface SessionState {
+  slug: string;
+  plan: string;
+  planPath: string;
+  startTime: number;
+  lastTick: number;
+}
+
+interface HookDefinition {
+  type: string;
+  command: string;
+  timeout: number;
+}
+
+interface HookMatcher {
+  hooks?: HookDefinition[];
+  [key: string]: unknown;
+}
+
 interface PRStatus {
   state: "OPEN" | "MERGED" | "CLOSED";
   url: string;
@@ -202,10 +247,14 @@ function loadRepoSlugs(dataDir: string): string[] {
   if (!existsSync(reposDir)) return [];
   return readdirSync(reposDir).filter((entry) => {
     const entryPath = resolve(reposDir, entry);
-    return (
-      statSync(entryPath).isDirectory() &&
-      existsSync(metaJsonPath(dataDir, entry))
-    );
+    try {
+      return (
+        statSync(entryPath).isDirectory() &&
+        existsSync(metaJsonPath(dataDir, entry))
+      );
+    } catch {
+      return false;
+    }
   });
 }
 
@@ -238,6 +287,25 @@ function registerRepo(dataDir: string, repoRoot: string): string {
     writeFileSync(mPath, JSON.stringify(meta, null, 2) + "\n");
   }
 
+  // Migrate legacy .claudet.json → config.json
+  const cfgPath = projectConfigPath(dataDir, slug);
+  if (!existsSync(cfgPath)) {
+    const legacyPath = resolve(repoRoot, ".claudet.json");
+    if (existsSync(legacyPath)) {
+      const legacy = tryParseJson<Record<string, unknown>>(
+        tryReadFileSync(legacyPath),
+        {},
+      );
+      const migrated: ProjectConfig = {};
+      if (typeof legacy.defaultTarget === "string")
+        migrated.defaultTarget = legacy.defaultTarget;
+      if (Array.isArray(legacy.setup)) migrated.setup = legacy.setup;
+      if (Object.keys(migrated).length > 0) {
+        saveProjectConfig(dataDir, slug, migrated);
+      }
+    }
+  }
+
   return slug;
 }
 
@@ -268,6 +336,8 @@ function saveMeta(dataDir: string, slug: string, meta: RepoMeta): void {
   writeFileSync(metaJsonPath(dataDir, slug), JSON.stringify(meta, null, 2) + "\n");
 }
 
+// Race condition note: concurrent writes to meta/worktrees are acceptable
+// for a single-user CLI — last-write-wins is fine for timestamps.
 function touchLastAccessed(
   dataDir: string,
   slug: string,
@@ -516,7 +586,12 @@ async function fetchPRStatuses(
       direction: "desc",
     })
     .then((r) => r.data)
-    .catch(() => null);
+    .catch((err) => {
+      onPhase?.(
+        `PR fetch failed: ${err instanceof Error ? err.message : err}`,
+      );
+      return null;
+    });
 
   if (!allPRs) {
     for (const [name] of entries) result.set(name, null);
@@ -594,6 +669,27 @@ function sessionStatePath(sessionId: string): string {
   return join("/tmp", `claudet-worklog-${sessionId}.json`);
 }
 
+function cleanStaleSessionFiles(): void {
+  const prefix = "claudet-worklog-";
+  const tmpDir = "/tmp";
+  try {
+    for (const entry of readdirSync(tmpDir)) {
+      if (!entry.startsWith(prefix) || !entry.endsWith(".json")) continue;
+      const filePath = join(tmpDir, entry);
+      try {
+        const stats = statSync(filePath);
+        if (Date.now() - stats.mtimeMs > 24 * 60 * 60 * 1000) {
+          unlinkSync(filePath);
+        }
+      } catch {
+        // file vanished — skip
+      }
+    }
+  } catch {
+    // /tmp unreadable — skip
+  }
+}
+
 function updatePlanTimeTracked(pPath: string, addMs: number): void {
   if (!existsSync(pPath)) return;
   const content = readFileSync(pPath, "utf-8");
@@ -647,7 +743,7 @@ async function reconcileWorktrees(
       // Discover branch from git
       let branch = entry;
       try {
-        branch = execSync("git symbolic-ref --short HEAD", {
+        branch = execFileSync("git", ["symbolic-ref", "--short", "HEAD"], {
           cwd: dirPath,
           encoding: "utf-8",
         }).trim();
@@ -699,8 +795,10 @@ async function reconcileWorktrees(
       createPlanFile(dataDir, slug, name, { target: "dev", branch });
       changed = true;
     }
-  } catch {
-    // git worktree list failed — skip cross-check
+  } catch (err) {
+    process.stderr.write(
+      `warning: git worktree list failed during reconciliation: ${err instanceof Error ? err.message : err}\n`,
+    );
   }
 
   if (changed) {
@@ -733,10 +831,10 @@ function findWorktreeForCwd(
 
 async function worklogStart(): Promise<void> {
   const inputRaw = tryReadFileSync("/dev/stdin");
-  const input: any = tryParseJson(inputRaw, {});
+  const input = tryParseJson<WorklogInput>(inputRaw, {});
 
-  const sessionId: string | undefined = input.session_id;
-  const cwd: string | undefined = input.cwd;
+  const sessionId = input.session_id;
+  const cwd = input.cwd;
 
   if (!sessionId || !cwd) return;
 
@@ -768,15 +866,18 @@ async function worklogStart(): Promise<void> {
 
 async function worklogTick(): Promise<void> {
   const inputRaw = tryReadFileSync("/dev/stdin");
-  const input: any = tryParseJson(inputRaw, {});
+  const input = tryParseJson<WorklogInput>(inputRaw, {});
 
-  const sessionId: string | undefined = input.session_id;
+  const sessionId = input.session_id;
   if (!sessionId) return;
 
   const statePath = sessionStatePath(sessionId);
   if (!existsSync(statePath)) return;
 
-  const state: any = tryParseJson(tryReadFileSync(statePath), null);
+  const state = tryParseJson<SessionState | null>(
+    tryReadFileSync(statePath),
+    null,
+  );
   if (!state) return;
 
   const dataDir = resolveDataDir();
@@ -865,13 +966,14 @@ async function pushAndCreateDraftPR(
 // Hook auto-configuration
 // ---------------------------------------------------------------------------
 
+// Race condition note: concurrent settings writes are acceptable for single-user CLI.
 function ensureWorklogHooks(): void {
-  const settings: any = tryParseJson(tryReadFileSync(GLOBAL_SETTINGS_FILE), {});
+  const settings = tryParseJson<Record<string, HookMatcher[]>>(
+    tryReadFileSync(GLOBAL_SETTINGS_FILE),
+    {},
+  );
 
-  const requiredHooks: Record<
-    string,
-    { type: string; command: string; timeout: number }
-  > = {
+  const requiredHooks: Record<string, HookDefinition> = {
     SessionStart: {
       type: "command",
       command: "claudet worklog start",
@@ -883,10 +985,10 @@ function ensureWorklogHooks(): void {
   let changed = false;
 
   for (const [event, hookDef] of Object.entries(requiredHooks)) {
-    const existing: any[] = settings[event] || [];
-    const hasOurHook = existing.some((matcher: any) =>
+    const existing: HookMatcher[] = settings[event] || [];
+    const hasOurHook = existing.some((matcher) =>
       (matcher.hooks || []).some(
-        (h: any) => h.type === "command" && h.command === hookDef.command,
+        (h) => h.type === "command" && h.command === hookDef.command,
       ),
     );
 
@@ -1038,78 +1140,105 @@ async function createWorktree(
     s?.stop(`Created worktree ${pc.bold(shortName)}.`);
   }
 
-  // Symlink .claude/settings.local.json
-  const localSettings = resolve(repoRoot, ".claude", "settings.local.json");
-  if (existsSync(localSettings)) {
-    const destDir = resolve(wtPath, ".claude");
-    if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true });
-    const destPath = resolve(destDir, "settings.local.json");
-    if (!existsSync(destPath)) {
-      symlinkSync(localSettings, destPath);
-    }
-  }
-
-  // Symlink .env* files
-  const envFiles = readdirSync(repoRoot).filter(
-    (f) => f.startsWith(".env") && statSync(resolve(repoRoot, f)).isFile(),
-  );
-  for (const envFile of envFiles) {
-    const targetEnvPath = resolve(repoRoot, envFile);
-    const link = resolve(wtPath, envFile);
-    if (!existsSync(link)) {
-      symlinkSync(targetEnvPath, link);
-    }
-  }
-
-  if (envFiles.length > 0 && !quiet) {
-    p.log.step(`Symlinked ${envFiles.length} env file(s) + settings.`);
-  }
-
-  // Run setup commands from project config
-  if (!skipSetup) {
-    const projectConfig = loadProjectConfig(repoRoot);
-    const setupCommands = projectConfig.setup ?? [];
-    for (const cmd of setupCommands) {
-      if (quiet) {
-        runLoud(cmd, wtPath);
-      } else {
-        s?.start(`Running: ${pc.dim(cmd)}...`);
-        runLoud(cmd, wtPath);
-        s?.stop(`Done: ${pc.dim(cmd)}`);
+  // Post-creation setup: symlinks, setup commands, plan, metadata.
+  // Wrapped in try-catch to clean up on failure — prevents orphaned worktrees.
+  try {
+    // Symlink .claude/settings.local.json
+    const localSettings = resolve(repoRoot, ".claude", "settings.local.json");
+    if (existsSync(localSettings)) {
+      const destDir = resolve(wtPath, ".claude");
+      if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true });
+      const destPath = resolve(destDir, "settings.local.json");
+      if (!existsSync(destPath)) {
+        symlinkSync(localSettings, destPath);
       }
     }
-  }
 
-  // Create plan file
-  const planPath = createPlanFile(dataDir, slug, shortName, {
-    target,
-    branch,
-    ticket,
-  });
-
-  const entry: WorktreeEntry = {
-    branch,
-    target,
-    archivedAt: null,
-  };
-
-  const data = loadWorktrees(dataDir, slug);
-  data.worktrees[shortName] = entry;
-  saveWorktrees(dataDir, slug, data);
-
-  if (!quiet) {
-    p.note(
-      [
-        `${pc.dim("Path")}    ${wtPath}`,
-        `${pc.dim("Branch")}  ${pc.cyan(branch)}`,
-        `${pc.dim("Target")}  ${target}`,
-        `${pc.dim("Plan")}    ${planPath}`,
-      ].join("\n"),
-      "Worktree Ready",
+    // Symlink .env* files
+    const envFiles = readdirSync(repoRoot).filter(
+      (f) => f.startsWith(".env") && statSync(resolve(repoRoot, f)).isFile(),
     );
-  }
+    for (const envFile of envFiles) {
+      const targetEnvPath = resolve(repoRoot, envFile);
+      const link = resolve(wtPath, envFile);
+      if (!existsSync(link)) {
+        symlinkSync(targetEnvPath, link);
+      }
+    }
 
-  return { entry, wtPath, planPath };
+    if (envFiles.length > 0 && !quiet) {
+      p.log.step(`Symlinked ${envFiles.length} env file(s) + settings.`);
+    }
+
+    // Run setup commands from project config (failures are non-fatal)
+    if (!skipSetup) {
+      const projectConfig = loadProjectConfig(dataDir, slug);
+      const setupCommands = projectConfig.setup ?? [];
+      for (const cmd of setupCommands) {
+        try {
+          if (quiet) {
+            runLoud(cmd, wtPath);
+          } else {
+            s?.start(`Running: ${pc.dim(cmd)}...`);
+            runLoud(cmd, wtPath);
+            s?.stop(`Done: ${pc.dim(cmd)}`);
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (quiet) {
+            process.stderr.write(
+              `warning: setup command failed: ${cmd} — ${msg}\n`,
+            );
+          } else {
+            s?.stop(pc.yellow(`Setup command failed: ${pc.dim(cmd)}`));
+            p.log.warn(msg);
+          }
+        }
+      }
+    }
+
+    // Create plan file
+    const planPath = createPlanFile(dataDir, slug, shortName, {
+      target,
+      branch,
+      ticket,
+    });
+
+    const entry: WorktreeEntry = {
+      branch,
+      target,
+      archivedAt: null,
+    };
+
+    // Race condition note: concurrent metadata writes are acceptable for single-user CLI.
+    const data = loadWorktrees(dataDir, slug);
+    data.worktrees[shortName] = entry;
+    saveWorktrees(dataDir, slug, data);
+
+    if (!quiet) {
+      p.note(
+        [
+          `${pc.dim("Path")}    ${wtPath}`,
+          `${pc.dim("Branch")}  ${pc.cyan(branch)}`,
+          `${pc.dim("Target")}  ${target}`,
+          `${pc.dim("Plan")}    ${planPath}`,
+        ].join("\n"),
+        "Worktree Ready",
+      );
+    }
+
+    return { entry, wtPath, planPath };
+  } catch (err) {
+    // Best-effort cleanup — remove the worktree to avoid orphaned state
+    try {
+      await g.raw("worktree", "remove", wtPath, "--force");
+    } catch {
+      // cleanup failed — worktree may be orphaned
+    }
+    throw err instanceof Error
+      ? err
+      : new Error(`Worktree post-creation setup failed: ${err}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1226,14 +1355,14 @@ async function promptManualRepoPath(
     });
     if (cancelled(shouldCreate) || !shouldCreate) bail("Cancelled.");
     mkdirSync(root, { recursive: true });
-    execSync("git init", { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
     p.log.success(`Created and initialized git repo at ${root}`);
   } else if (!existsSync(join(root, ".git"))) {
     const shouldInit = await p.confirm({
       message: "Not a git repo. Initialize with git init?",
     });
     if (cancelled(shouldInit) || !shouldInit) bail("Cancelled.");
-    execSync("git init", { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
     p.log.success(`Initialized git repo at ${root}`);
   }
 
@@ -1251,6 +1380,7 @@ async function interactiveFlow(): Promise<void> {
   }
 
   const dataDir = resolveDataDir();
+  cleanStaleSessionFiles();
 
   const { slug, repoRoot } = await pickRepo(dataDir);
 
@@ -1359,17 +1489,19 @@ async function createNewWorktreeFlow(
   slug: string,
   repoRoot: string,
 ): Promise<void> {
-  const projectConfig = loadProjectConfig(repoRoot);
-  const defaultTarget = projectConfig.defaultTarget || "dev";
+  const projectConfig = loadProjectConfig(dataDir, slug);
+  const globalConfig = loadGlobalConfig();
+  const defaultTarget = projectConfig.defaultTarget || globalConfig.defaultTarget || "dev";
 
   // Get local branches for target selection
   let branchSummary = await git(repoRoot).branchLocal();
   if (branchSummary.all.length === 0) {
     // Fresh repo with no commits — create initial commit so branches exist
-    execSync("git commit --allow-empty -m 'Initial commit'", {
-      cwd: repoRoot,
-      stdio: "ignore",
-    });
+    execFileSync(
+      "git",
+      ["commit", "--allow-empty", "-m", "Initial commit"],
+      { cwd: repoRoot, stdio: "ignore" },
+    );
     branchSummary = await git(repoRoot).branchLocal();
     p.log.info(`Created initial commit on ${branchSummary.current || "main"}`);
   }
@@ -1381,7 +1513,7 @@ async function createNewWorktreeFlow(
         p.text({
           message: "Branch name",
           placeholder: "feat/new-feature",
-          validate: (v) => (!v ? "Branch name is required" : undefined),
+          validate: validateBranchName,
         }),
       target: () => {
         const defaultIdx = localBranches.indexOf(defaultTarget);
@@ -1457,10 +1589,11 @@ async function createCommand(): Promise<void> {
     ? resolve(flags.repo)
     : await discoverRepoRoot(process.cwd());
 
-  const dataDir = resolveDataDir(repoRoot);
+  const dataDir = resolveDataDir();
   const slug = registerRepo(dataDir, repoRoot);
-  const projectConfig = loadProjectConfig(repoRoot);
-  const target = flags.target || projectConfig.defaultTarget || "dev";
+  const projectConfig = loadProjectConfig(dataDir, slug);
+  const globalConfig = loadGlobalConfig();
+  const target = flags.target || projectConfig.defaultTarget || globalConfig.defaultTarget || "dev";
   const shortName = deriveShortName(flags.branch);
 
   // Pre-validate
@@ -1490,20 +1623,26 @@ async function createCommand(): Promise<void> {
   );
 
   if (flags.draftPR) {
-    const wt = wtDirPath(dataDir, slug, shortName);
-    await git(wt).push("origin", flags.branch, ["--set-upstream"]);
-    const info = await getRepoInfo(wt);
-    const octokit = getOctokit();
-    if (info && octokit) {
-      await octokit.rest.pulls.create({
-        owner: info.owner,
-        repo: info.repo,
-        head: flags.branch,
-        base: target,
-        title: flags.branch,
-        body: "WIP",
-        draft: true,
-      });
+    try {
+      const wt = wtDirPath(dataDir, slug, shortName);
+      await git(wt).push("origin", flags.branch, ["--set-upstream"]);
+      const info = await getRepoInfo(wt);
+      const octokit = getOctokit();
+      if (info && octokit) {
+        await octokit.rest.pulls.create({
+          owner: info.owner,
+          repo: info.repo,
+          head: flags.branch,
+          base: target,
+          title: flags.branch,
+          body: "WIP",
+          draft: true,
+        });
+      }
+    } catch (err) {
+      throw new Error(
+        `Worktree created successfully but draft PR failed: ${err instanceof Error ? err.message : err}`,
+      );
     }
   }
 
@@ -1563,7 +1702,10 @@ async function cleanFlow(): Promise<void> {
     try {
       await g.deleteLocalBranch(entry.branch, true);
     } catch {}
-    delete data.worktrees[name];
+    // Only delete metadata if the directory was actually removed
+    if (!existsSync(smokeWtPath)) {
+      delete data.worktrees[name];
+    }
   }
 
   if (smokeRemoved > 0) {
@@ -1727,6 +1869,22 @@ async function runInitSetup(): Promise<void> {
   });
   if (cancelled(scanDirsInput)) bail("Cancelled.");
 
+  const highPriorityTargetInput = await p.text({
+    message: "High priority target branch",
+    placeholder: "main",
+    defaultValue: existing.highPriorityTarget || "main",
+    initialValue: existing.highPriorityTarget || "",
+  });
+  if (cancelled(highPriorityTargetInput)) bail("Cancelled.");
+
+  const defaultTargetInput = await p.text({
+    message: "Normal priority target branch",
+    placeholder: "dev",
+    defaultValue: existing.defaultTarget || "dev",
+    initialValue: existing.defaultTarget || "",
+  });
+  if (cancelled(defaultTargetInput)) bail("Cancelled.");
+
   const dataDirInput = await p.text({
     message: "Data directory for claudet",
     placeholder: "~/.claudet",
@@ -1741,16 +1899,27 @@ async function runInitSetup(): Promise<void> {
     .filter(Boolean);
   const dataDir = (dataDirInput as string).trim() || "~/.claudet";
 
+  const highPriorityTarget = (highPriorityTargetInput as string).trim() || "main";
+  const defaultTarget = (defaultTargetInput as string).trim() || "dev";
+
   const config: GlobalConfig = { scanDirs };
   if (dataDir !== "~/.claudet") {
     config.dataDir = dataDir;
   }
+  if (highPriorityTarget !== "main") {
+    config.highPriorityTarget = highPriorityTarget;
+  }
+  if (defaultTarget !== "dev") {
+    config.defaultTarget = defaultTarget;
+  }
 
   p.note(
     [
-      `${pc.dim("Scan dirs")}  ${scanDirs.join(", ")}`,
-      `${pc.dim("Data dir")}   ${dataDir}`,
-      `${pc.dim("Config")}     ${GLOBAL_CONFIG_PATH}`,
+      `${pc.dim("Scan dirs")}       ${scanDirs.join(", ")}`,
+      `${pc.dim("High priority")}   ${highPriorityTarget}`,
+      `${pc.dim("Normal target")}   ${defaultTarget}`,
+      `${pc.dim("Data dir")}        ${dataDir}`,
+      `${pc.dim("Config")}          ${GLOBAL_CONFIG_PATH}`,
     ].join("\n"),
     "Settings",
   );
@@ -1846,7 +2015,7 @@ switch (subcommand) {
 
   ${pc.dim("claudet create flags:")}
     --branch, -b <name>      Branch name (required)
-    --target, -t <branch>    Base branch (default: .claudet.json defaultTarget or dev)
+    --target, -t <branch>    Base branch (default: project config defaultTarget or dev)
     --ticket <id>            Issue tracker ticket ID
     --draft-pr               Push and create a GitHub draft PR
     --skip-setup             Skip setup commands
