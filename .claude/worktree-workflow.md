@@ -15,6 +15,7 @@ All claudet data lives in a single configurable directory (`~/.claudet/` by defa
 └── repos/
     └── <org>--<repo>/                   # Slug from last 2 path segments
         ├── meta.json                    # { repoRoot, registeredAt }
+        ├── config.json                  # Project config (defaultTarget, setup)
         ├── worktrees.json               # Worktree entries (branch, target, archivedAt)
         ├── plans/
         │   └── <name>.md
@@ -26,9 +27,8 @@ All claudet data lives in a single configurable directory (`~/.claudet/` by defa
 
 ```
 1. CLAUDET_DATA_DIR env var
-2. <repoRoot>/.claudet.json → { "dataDir": "..." }
-3. ~/.config/claudet/config.json → { "dataDir": "..." }
-4. Default: ~/.claudet/
+2. ~/.claudet/config.json → { "dataDir": "..." }
+3. Default: ~/.claudet/
 ```
 
 ### What stays in `~/.claude/`
@@ -45,19 +45,18 @@ Only Claude Code's own files: `settings.json` (hooks), `CLAUDE.md`, `CLAUDE.loca
 - Entries are never deleted from `worktrees.json`; archived entries have `archivedAt` set
 - WorktreeEntry fields: `branch`, `target`, `archivedAt` (path/repo/planPath are derived at runtime)
 
-## Project Config (`.claudet.json`)
+## Project Config
 
-Committable file in the repo root:
+Stored at `~/.claudet/repos/<slug>/config.json`:
 
 ```jsonc
 {
-  "dataDir": "~/.claudet", // optional, user-specific (gitignore or omit)
-  "defaultTarget": "dev", // shared project setting
-  "setup": ["pnpm install"], // custom post-worktree-creation commands
+  "defaultTarget": "dev", // default base branch for new worktrees
+  "setup": ["pnpm install"], // commands to run after worktree creation
 }
 ```
 
-Teammates commit `defaultTarget` and `setup`. Each user can override `dataDir` via env var or `~/.config/claudet/config.json`.
+On first registration, legacy `.claudet.json` fields (`defaultTarget`, `setup`) are migrated automatically.
 
 ## Commands
 
@@ -71,7 +70,7 @@ claudet clean        # Interactive: select worktrees to archive (with confirmati
 When creating via `claudet`:
 
 1. **Branch name** — e.g., `feat/new-feature`
-2. **Target branch** — Default from `.claudet.json` `defaultTarget` or `dev`.
+2. **Target branch** — Default from project config `defaultTarget` or `dev`.
 3. **Issue ticket** — Optional. Written to plan file.
 4. **Create draft PR?** — Optional. Runs `gh pr create --draft`.
 
@@ -79,7 +78,7 @@ The script:
 
 - Creates the git worktree at `~/.claudet/repos/<slug>/worktrees/<name>/`
 - Symlinks `.env*` files and `.claude/settings.local.json` from the main repo
-- Runs setup commands from `.claudet.json` `setup` array
+- Runs setup commands from project config `setup` array
 - Creates a plan file from template
 - Registers in `worktrees.json`
 - Launches Claude in the worktree

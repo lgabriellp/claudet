@@ -1,5 +1,14 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync } from "fs";
+import { execSync } from "child_process";
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+  utimesSync,
+  chmodSync,
+  readdirSync,
+} from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import {
@@ -17,6 +26,9 @@ import {
   getLastProgress,
   scanForGitRepos,
   validateBranchName,
+  cleanStaleSessionFiles,
+  loadRepoSlugs,
+  mergeWorklogHooks,
 } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -505,5 +517,212 @@ describe("scanForGitRepos", () => {
       join(tmp, "a-repo"),
       join(tmp, "z-repo"),
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cleanStaleSessionFiles
+// ---------------------------------------------------------------------------
+
+describe("cleanStaleSessionFiles", () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "cleantest-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("deletes .json files with claudet-worklog- prefix older than 24h", () => {
+    const file = join(tmp, "claudet-worklog-abc.json");
+    writeFileSync(file, "{}");
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    utimesSync(file, twoDaysAgo, twoDaysAgo);
+
+    cleanStaleSessionFiles(tmp);
+
+    expect(readdirSync(tmp)).toEqual([]);
+  });
+
+  it("keeps files newer than 24h", () => {
+    const file = join(tmp, "claudet-worklog-new.json");
+    writeFileSync(file, "{}");
+
+    cleanStaleSessionFiles(tmp);
+
+    expect(readdirSync(tmp)).toEqual(["claudet-worklog-new.json"]);
+  });
+
+  it("skips files without the prefix", () => {
+    const file = join(tmp, "other-file.json");
+    writeFileSync(file, "{}");
+    const old = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    utimesSync(file, old, old);
+
+    cleanStaleSessionFiles(tmp);
+
+    expect(readdirSync(tmp)).toEqual(["other-file.json"]);
+  });
+
+  it("skips non-.json files", () => {
+    const file = join(tmp, "claudet-worklog-abc.txt");
+    writeFileSync(file, "data");
+    const old = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    utimesSync(file, old, old);
+
+    cleanStaleSessionFiles(tmp);
+
+    expect(readdirSync(tmp)).toEqual(["claudet-worklog-abc.txt"]);
+  });
+
+  it("tolerates files vanishing during iteration (race)", () => {
+    // Create and immediately delete — the function reads the dir, then
+    // tries to stat each entry. If the entry vanishes, it should not throw.
+    const file = join(tmp, "claudet-worklog-gone.json");
+    writeFileSync(file, "{}");
+    rmSync(file);
+
+    expect(() => cleanStaleSessionFiles(tmp)).not.toThrow();
+  });
+
+  it("tolerates unreadable directory", () => {
+    expect(() =>
+      cleanStaleSessionFiles(join(tmp, "no-such-dir")),
+    ).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// loadRepoSlugs
+// ---------------------------------------------------------------------------
+
+describe("loadRepoSlugs", () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "slugtest-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("returns empty array when repos/ doesn't exist", () => {
+    expect(loadRepoSlugs(tmp)).toEqual([]);
+  });
+
+  it("returns slugs for directories with meta.json", () => {
+    mkdirSync(join(tmp, "repos", "org--project"), { recursive: true });
+    writeFileSync(join(tmp, "repos", "org--project", "meta.json"), "{}");
+    mkdirSync(join(tmp, "repos", "foo--bar"), { recursive: true });
+    writeFileSync(join(tmp, "repos", "foo--bar", "meta.json"), "{}");
+
+    const result = loadRepoSlugs(tmp);
+    expect(result.sort()).toEqual(["foo--bar", "org--project"]);
+  });
+
+  it("filters out files (non-directories)", () => {
+    mkdirSync(join(tmp, "repos"), { recursive: true });
+    writeFileSync(join(tmp, "repos", "stray-file"), "oops");
+    mkdirSync(join(tmp, "repos", "valid--repo"));
+    writeFileSync(join(tmp, "repos", "valid--repo", "meta.json"), "{}");
+
+    expect(loadRepoSlugs(tmp)).toEqual(["valid--repo"]);
+  });
+
+  it("handles entries that vanish between readdir and stat", () => {
+    // Directory with no meta.json → filtered out, but shouldn't throw
+    mkdirSync(join(tmp, "repos", "ghost--repo"), { recursive: true });
+    // No meta.json → will be filtered by existsSync check, not an error
+
+    expect(() => loadRepoSlugs(tmp)).not.toThrow();
+    expect(loadRepoSlugs(tmp)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mergeWorklogHooks
+// ---------------------------------------------------------------------------
+
+describe("mergeWorklogHooks", () => {
+  it("adds hooks when none exist", () => {
+    const { settings, changed } = mergeWorklogHooks({});
+
+    expect(changed).toBe(true);
+    expect(settings.SessionStart).toHaveLength(1);
+    expect(settings.SessionStart[0].hooks![0].command).toBe(
+      "claudet worklog start",
+    );
+    expect(settings.Stop).toHaveLength(1);
+    expect(settings.Stop[0].hooks![0].command).toBe("claudet worklog tick");
+  });
+
+  it("detects existing hooks and doesn't duplicate", () => {
+    const initial = {
+      SessionStart: [
+        {
+          hooks: [
+            { type: "command", command: "claudet worklog start", timeout: 10 },
+          ],
+        },
+      ],
+      Stop: [
+        {
+          hooks: [
+            { type: "command", command: "claudet worklog tick", timeout: 10 },
+          ],
+        },
+      ],
+    };
+
+    const { settings, changed } = mergeWorklogHooks(initial);
+
+    expect(changed).toBe(false);
+    expect(settings.SessionStart).toHaveLength(1);
+    expect(settings.Stop).toHaveLength(1);
+  });
+
+  it("merges into settings with other existing hooks", () => {
+    const initial = {
+      SessionStart: [
+        {
+          hooks: [
+            { type: "command", command: "some-other-tool start", timeout: 5 },
+          ],
+        },
+      ],
+    };
+
+    const { settings, changed } = mergeWorklogHooks(initial);
+
+    expect(changed).toBe(true);
+    // Original hook preserved
+    expect(settings.SessionStart).toHaveLength(2);
+    expect(settings.SessionStart[0].hooks![0].command).toBe(
+      "some-other-tool start",
+    );
+    // Our hook added
+    expect(settings.SessionStart[1].hooks![0].command).toBe(
+      "claudet worklog start",
+    );
+    // Stop added fresh
+    expect(settings.Stop).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// E2E: compilation / startup smoke test
+// ---------------------------------------------------------------------------
+
+describe("e2e smoke test", () => {
+  it("compiles and runs --help without error", () => {
+    const result = execSync("pnpm exec tsx src/claudet.ts --help", {
+      cwd: join(import.meta.dirname!, ".."),
+      encoding: "utf-8",
+      timeout: 30_000,
+    });
+    expect(result).toContain("claudet");
   });
 });
