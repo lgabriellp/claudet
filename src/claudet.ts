@@ -1465,19 +1465,6 @@ async function createNewWorktreeFlow(
   }
   const localBranches = branchSummary.all;
 
-  // Get local branches for target selection
-  let branchSummary = await git(repoRoot).branchLocal();
-  if (branchSummary.all.length === 0) {
-    // Fresh repo with no commits — create initial commit so branches exist
-    execSync("git commit --allow-empty -m 'Initial commit'", {
-      cwd: repoRoot,
-      stdio: "ignore",
-    });
-    branchSummary = await git(repoRoot).branchLocal();
-    p.log.info(`Created initial commit on ${branchSummary.current || "main"}`);
-  }
-  const localBranches = branchSummary.all;
-
   const result = await p.group(
     {
       branch: () =>
