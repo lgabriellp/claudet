@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeAll, beforeEach, afterEach } from "vitest";
 import { execSync } from "child_process";
 import {
   mkdtempSync,
@@ -10,7 +10,6 @@ import {
   readdirSync,
 } from "fs";
 import { join } from "path";
-import { tmpdir } from "os";
 import {
   tryParseJson,
   expandHome,
@@ -29,7 +28,15 @@ import {
   cleanStaleSessionFiles,
   loadRepoSlugs,
   mergeWorklogHooks,
+  compareWorktreeEntries,
+  type WorktreeSortEntry,
 } from "./helpers.js";
+
+const TEST_TMP = join(import.meta.dirname!, "..", ".test-tmp");
+
+beforeAll(() => {
+  mkdirSync(TEST_TMP, { recursive: true });
+});
 
 // ---------------------------------------------------------------------------
 // tryParseJson
@@ -328,6 +335,82 @@ describe("compareDatesDesc", () => {
 });
 
 // ---------------------------------------------------------------------------
+// compareWorktreeEntries
+// ---------------------------------------------------------------------------
+
+describe("compareWorktreeEntries", () => {
+  const EPOCH = "1970-01-01T00:00:00.000Z";
+
+  it("sorts high-priority target before normal target", () => {
+    const entries: WorktreeSortEntry[] = [
+      { target: "dev", lastAccessedAt: "2026-03-05T12:00:00Z" },
+      { target: "main", lastAccessedAt: "2026-03-01T12:00:00Z" },
+    ];
+    entries.sort(compareWorktreeEntries("main"));
+    expect(entries[0].target).toBe("main");
+    expect(entries[1].target).toBe("dev");
+  });
+
+  it("falls through to recency when priority is equal", () => {
+    const entries: WorktreeSortEntry[] = [
+      { target: "main", lastAccessedAt: "2026-03-01T12:00:00Z" },
+      { target: "main", lastAccessedAt: "2026-03-05T12:00:00Z" },
+    ];
+    entries.sort(compareWorktreeEntries("main"));
+    expect(entries[0].lastAccessedAt).toBe("2026-03-05T12:00:00Z");
+    expect(entries[1].lastAccessedAt).toBe("2026-03-01T12:00:00Z");
+  });
+
+  it("works with custom highPriorityTarget value", () => {
+    const entries: WorktreeSortEntry[] = [
+      { target: "main", lastAccessedAt: "2026-03-05T12:00:00Z" },
+      { target: "dev", lastAccessedAt: "2026-03-01T12:00:00Z" },
+    ];
+    entries.sort(compareWorktreeEntries("dev"));
+    expect(entries[0].target).toBe("dev");
+    expect(entries[1].target).toBe("main");
+  });
+
+  it("sorts epoch default last within priority group", () => {
+    const entries: WorktreeSortEntry[] = [
+      { target: "main", lastAccessedAt: EPOCH },
+      { target: "main", lastAccessedAt: "2026-03-05T12:00:00Z" },
+    ];
+    entries.sort(compareWorktreeEntries("main"));
+    expect(entries[0].lastAccessedAt).toBe("2026-03-05T12:00:00Z");
+    expect(entries[1].lastAccessedAt).toBe(EPOCH);
+  });
+
+  it("sorts full realistic list correctly", () => {
+    const entries: WorktreeSortEntry[] = [
+      { target: "dev", lastAccessedAt: "2026-03-04T10:00:00Z" },
+      { target: "main", lastAccessedAt: "2026-03-01T08:00:00Z" },
+      { target: "main", lastAccessedAt: "2026-03-05T12:00:00Z" },
+      { target: "dev", lastAccessedAt: EPOCH },
+      { target: "main", lastAccessedAt: EPOCH },
+    ];
+    entries.sort(compareWorktreeEntries("main"));
+    expect(entries.map((e) => `${e.target}:${e.lastAccessedAt}`)).toEqual([
+      "main:2026-03-05T12:00:00Z",
+      "main:2026-03-01T08:00:00Z",
+      "main:1970-01-01T00:00:00.000Z",
+      "dev:2026-03-04T10:00:00Z",
+      "dev:1970-01-01T00:00:00.000Z",
+    ]);
+  });
+
+  it("keeps order stable when entries are identical", () => {
+    const entries: WorktreeSortEntry[] = [
+      { target: "main", lastAccessedAt: "2026-03-05T12:00:00Z" },
+      { target: "main", lastAccessedAt: "2026-03-05T12:00:00Z" },
+    ];
+    entries.sort(compareWorktreeEntries("main"));
+    expect(entries).toHaveLength(2);
+    expect(entries[0].lastAccessedAt).toBe("2026-03-05T12:00:00Z");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // getStatusFromPlan
 // ---------------------------------------------------------------------------
 
@@ -462,7 +545,7 @@ describe("scanForGitRepos", () => {
   let tmp: string;
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), "scantest-"));
+    tmp = mkdtempSync(join(TEST_TMP, "scantest-"));
   });
 
   afterEach(() => {
@@ -527,7 +610,7 @@ describe("cleanStaleSessionFiles", () => {
   let tmp: string;
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), "cleantest-"));
+    tmp = mkdtempSync(join(TEST_TMP, "cleantest-"));
   });
 
   afterEach(() => {
@@ -601,7 +684,7 @@ describe("loadRepoSlugs", () => {
   let tmp: string;
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), "slugtest-"));
+    tmp = mkdtempSync(join(TEST_TMP, "slugtest-"));
   });
 
   afterEach(() => {
