@@ -155,6 +155,26 @@ export function compareDatesDesc(
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Worktree sort helpers
+// ---------------------------------------------------------------------------
+
+export interface WorktreeSortEntry {
+  target: string;
+  lastAccessedAt: string;
+}
+
+export function compareWorktreeEntries(
+  highPriorityTarget: string,
+): (a: WorktreeSortEntry, b: WorktreeSortEntry) => number {
+  return (a, b) => {
+    const aHigh = a.target === highPriorityTarget ? 0 : 1;
+    const bHigh = b.target === highPriorityTarget ? 0 : 1;
+    if (aHigh !== bHigh) return aHigh - bHigh;
+    return compareDatesDesc(a.lastAccessedAt, b.lastAccessedAt);
+  };
+}
+
 export function getLastProgress(content: string): string | null {
   const progressSection = content.split("## Progress")[1];
   if (!progressSection) return null;

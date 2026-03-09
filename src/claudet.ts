@@ -35,6 +35,7 @@ import {
   cleanStaleSessionFiles,
   loadRepoSlugs,
   mergeWorklogHooks,
+  compareWorktreeEntries,
   type CreateFlags,
   type HookDefinition,
   type HookMatcher,
@@ -389,10 +390,12 @@ function statusBadge(status: string, pad = 0): string {
   }
 }
 
-function prBadge(pr: PRStatus | null): string {
+function prBadge(pr: PRStatus | null, showConflict = true): string {
   if (!pr) return pc.dim("no PR");
   const conflict =
-    pr.mergeable === "CONFLICTING" ? `  ${pc.red("⚠ conflicts")}` : "";
+    showConflict && pr.mergeable === "CONFLICTING"
+      ? `  ${pc.red("⚠ conflicts")}`
+      : "";
   switch (pr.state) {
     case "OPEN":
       return pc.green(`PR #${pr.number} open`) + conflict;
@@ -1350,10 +1353,17 @@ async function interactiveFlow(): Promise<void> {
   ).length;
   s.stop(activeCount > 0 ? "Worktrees loaded." : "No active worktrees found.");
 
+  const EPOCH = "1970-01-01T00:00:00.000Z";
+  const globalCfg = loadGlobalConfig();
+  const highPriorityTarget = globalCfg.highPriorityTarget ?? "main";
+
   const activeEntries = Object.entries(data.worktrees)
     .filter(([name, entry]) => !entry.archivedAt && !isSmokeTestWorktree(name))
     .sort(([, a], [, b]) =>
-      compareDatesDesc(a.lastAccessedAt, b.lastAccessedAt),
+      compareWorktreeEntries(highPriorityTarget)(
+        { target: a.target, lastAccessedAt: a.lastAccessedAt ?? EPOCH },
+        { target: b.target, lastAccessedAt: b.lastAccessedAt ?? EPOCH },
+      ),
     );
 
   if (activeEntries.length === 0) {
@@ -1369,17 +1379,25 @@ async function interactiveFlow(): Promise<void> {
   );
   prSpinner.stop(`Loaded ${activeEntries.length} PRs.`);
 
-  // Build select options
+  // Build select options with columnar layout
   const STATUS_PAD = 12;
   const CREATE_NEW = "__create_new__";
+  const maxNameLen = Math.max(...activeEntries.map(([name]) => name.length));
+  const maxBranchLen = Math.max(
+    ...activeEntries.map(([, entry]) => entry.branch.length),
+  );
   const options = [
     ...activeEntries.map(([name, entry]) => {
       const status = getStatusFromPlan(planFilePath(dataDir, slug, name));
-      const pr = prStatuses.get(name);
+      const pr = prStatuses.get(name) ?? null;
+      const conflictHint =
+        pr?.mergeable === "CONFLICTING" ? pc.red("⚠ conflicts") : "";
       return {
         value: name,
-        label: `${statusBadge(status, STATUS_PAD)} ${name}`,
-        hint: `${pc.dim(entry.branch)}  ${prBadge(pr ?? null)}`,
+        label:
+          `${statusBadge(status, STATUS_PAD)} ${name.padEnd(maxNameLen + 2)}` +
+          `${pc.dim(entry.branch.padEnd(maxBranchLen + 2))}${prBadge(pr, false)}`,
+        hint: conflictHint,
       };
     }),
     {
