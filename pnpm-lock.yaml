@@ -19,6 +19,9 @@ importers:
       simple-git:
         specifier: ^3.32.3
         version: 3.32.3
+      zod:
+        specifier: ^4.3.6
+        version: 4.3.6
     devDependencies:
       "@types/node":
         specifier: ^22.0.0
@@ -1086,6 +1089,12 @@ packages:
     engines: { node: ">=8" }
     hasBin: true
 
+  zod@4.3.6:
+    resolution:
+      {
+        integrity: sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg==,
+      }
+
 snapshots:
   "@clack/core@0.4.2":
     dependencies:
@@ -1624,3 +1633,5 @@ snapshots:
     dependencies:
       siginfo: 2.0.0
       stackback: 0.0.2
+
+  zod@4.3.6: {}

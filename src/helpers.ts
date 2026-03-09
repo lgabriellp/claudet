@@ -2,6 +2,8 @@
 // Pure helper functions extracted from claudet.ts for testability
 // ---------------------------------------------------------------------------
 
+import { z } from "zod";
+
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
 
 // ---------------------------------------------------------------------------
@@ -347,10 +349,26 @@ export interface HookDefinition {
   timeout: number;
 }
 
-export interface HookMatcher {
-  hooks?: HookDefinition[];
-  [key: string]: unknown;
+export interface HookMatcherGroup {
+  matcher?: Record<string, unknown>;
+  hooks: HookDefinition[];
 }
+
+const HookDefinitionSchema = z.object({
+  type: z.string(),
+  command: z.string(),
+  timeout: z.number(),
+});
+
+const HookMatcherGroupSchema = z.object({
+  matcher: z.record(z.string(), z.unknown()).optional(),
+  hooks: z.array(HookDefinitionSchema),
+});
+
+export const HooksConfigSchema = z.record(
+  z.string(),
+  z.array(HookMatcherGroupSchema),
+);
 
 export function mergeWorklogHooks(settings: Record<string, unknown>): {
   settings: Record<string, unknown>;
@@ -366,24 +384,62 @@ export function mergeWorklogHooks(settings: Record<string, unknown>): {
   };
 
   const hooks =
-    (settings.hooks as Record<string, HookDefinition[]> | undefined) ?? {};
+    (settings.hooks as Record<string, HookMatcherGroup[]> | undefined) ?? {};
   let changed = false;
 
+  // Migrate flat HookDefinition entries to matcher groups
+  for (const event of Object.keys(hooks)) {
+    const entries = hooks[event];
+    if (!Array.isArray(entries)) continue;
+    hooks[event] = entries.map((entry: any) => {
+      if (Array.isArray(entry.hooks)) return entry; // already a matcher group
+      if (typeof entry.type === "string" && typeof entry.command === "string") {
+        changed = true;
+        return { hooks: [entry] }; // wrap flat entry
+      }
+      return entry; // unknown shape — leave as-is
+    });
+  }
+
+  // Deduplicate matcher groups by command string within each event
+  for (const event of Object.keys(hooks)) {
+    const seen = new Set<string>();
+    const deduped: HookMatcherGroup[] = [];
+    for (const group of hooks[event]) {
+      const key = group.hooks?.map((h) => h.command).join("|") ?? "";
+      if (!seen.has(key)) {
+        seen.add(key);
+        deduped.push(group);
+      } else {
+        changed = true;
+      }
+    }
+    hooks[event] = deduped;
+  }
+
+  // Add required hooks if missing
   for (const [event, hookDef] of Object.entries(requiredHooks)) {
-    const existing: HookDefinition[] = hooks[event] || [];
-    const hasOurHook = existing.some(
-      (h) => h.type === "command" && h.command === hookDef.command,
+    const existing: HookMatcherGroup[] = hooks[event] || [];
+    const hasOurHook = existing.some((group) =>
+      group.hooks?.some(
+        (h) => h.type === "command" && h.command === hookDef.command,
+      ),
     );
 
     if (!hasOurHook) {
-      existing.push(hookDef);
+      existing.push({ hooks: [hookDef] });
       hooks[event] = existing;
       changed = true;
     }
   }
 
-  if (changed) {
-    settings.hooks = hooks;
+  // Validate final shape before writing
+  try {
+    const validated = HooksConfigSchema.parse(hooks);
+    settings.hooks = validated;
+  } catch (err) {
+    console.error("mergeWorklogHooks: validation failed, skipping write", err);
+    return { settings, changed: false };
   }
 
   // Migrate legacy root-level hooks

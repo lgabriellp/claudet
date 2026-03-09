@@ -40,7 +40,7 @@ import {
   prNeedsAttention,
   type CreateFlags,
   type HookDefinition,
-  type HookMatcher,
+  type HookMatcherGroup,
   type ReviewDecision,
   type ReviewInfo,
 } from "./helpers.js";

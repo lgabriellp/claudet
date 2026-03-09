@@ -28,6 +28,7 @@ import {
   cleanStaleSessionFiles,
   loadRepoSlugs,
   mergeWorklogHooks,
+  HooksConfigSchema,
   compareWorktreeEntries,
   computeReviewDecision,
   prNeedsAttention,
@@ -945,22 +946,36 @@ describe("mergeWorklogHooks", () => {
     expect(changed).toBe(true);
     const hooks = settings.hooks as Record<
       string,
-      { type: string; command: string; timeout: number }[]
+      { hooks: { type: string; command: string; timeout: number }[] }[]
     >;
     expect(hooks.SessionStart).toHaveLength(1);
-    expect(hooks.SessionStart[0].command).toBe("claudet worklog start");
+    expect(hooks.SessionStart[0].hooks[0].command).toBe(
+      "claudet worklog start",
+    );
     expect(hooks.Stop).toHaveLength(1);
-    expect(hooks.Stop[0].command).toBe("claudet worklog tick");
+    expect(hooks.Stop[0].hooks[0].command).toBe("claudet worklog tick");
   });
 
   it("detects existing hooks and doesn't duplicate", () => {
     const initial = {
       hooks: {
         SessionStart: [
-          { type: "command", command: "claudet worklog start", timeout: 10 },
+          {
+            hooks: [
+              {
+                type: "command",
+                command: "claudet worklog start",
+                timeout: 10,
+              },
+            ],
+          },
         ],
         Stop: [
-          { type: "command", command: "claudet worklog tick", timeout: 10 },
+          {
+            hooks: [
+              { type: "command", command: "claudet worklog tick", timeout: 10 },
+            ],
+          },
         ],
       },
     };
@@ -970,7 +985,7 @@ describe("mergeWorklogHooks", () => {
     expect(changed).toBe(false);
     const hooks = settings.hooks as Record<
       string,
-      { type: string; command: string; timeout: number }[]
+      { hooks: { type: string; command: string; timeout: number }[] }[]
     >;
     expect(hooks.SessionStart).toHaveLength(1);
     expect(hooks.Stop).toHaveLength(1);
@@ -998,9 +1013,14 @@ describe("mergeWorklogHooks", () => {
       initial as Record<string, unknown>,
     );
     expect(changed).toBe(true);
-    const hooks = settings.hooks as Record<string, { command: string }[]>;
-    expect(hooks.SessionStart[0].command).toBe("claudet worklog start");
-    expect(hooks.Stop[0].command).toBe("claudet worklog tick");
+    const hooks = settings.hooks as Record<
+      string,
+      { hooks: { command: string }[] }[]
+    >;
+    expect(hooks.SessionStart[0].hooks[0].command).toBe(
+      "claudet worklog start",
+    );
+    expect(hooks.Stop[0].hooks[0].command).toBe("claudet worklog tick");
     expect(settings).not.toHaveProperty("SessionStart");
     expect(settings).not.toHaveProperty("Stop");
     expect(settings).toHaveProperty("permissions");
@@ -1010,7 +1030,11 @@ describe("mergeWorklogHooks", () => {
     const initial = {
       hooks: {
         SessionStart: [
-          { type: "command", command: "some-other-tool start", timeout: 5 },
+          {
+            hooks: [
+              { type: "command", command: "some-other-tool start", timeout: 5 },
+            ],
+          },
         ],
       },
     };
@@ -1020,15 +1044,120 @@ describe("mergeWorklogHooks", () => {
     expect(changed).toBe(true);
     const hooks = settings.hooks as Record<
       string,
-      { type: string; command: string; timeout: number }[]
+      { hooks: { type: string; command: string; timeout: number }[] }[]
     >;
     // Original hook preserved
     expect(hooks.SessionStart).toHaveLength(2);
-    expect(hooks.SessionStart[0].command).toBe("some-other-tool start");
+    expect(hooks.SessionStart[0].hooks[0].command).toBe(
+      "some-other-tool start",
+    );
     // Our hook added
-    expect(hooks.SessionStart[1].command).toBe("claudet worklog start");
+    expect(hooks.SessionStart[1].hooks[0].command).toBe(
+      "claudet worklog start",
+    );
     // Stop added fresh
     expect(hooks.Stop).toHaveLength(1);
+  });
+
+  it("migrates flat HookDefinition entries to matcher groups", () => {
+    const initial = {
+      hooks: {
+        SessionStart: [
+          { type: "command", command: "claudet worklog start", timeout: 10 },
+        ],
+      },
+    };
+
+    const { settings, changed } = mergeWorklogHooks(
+      initial as Record<string, unknown>,
+    );
+
+    expect(changed).toBe(true);
+    const hooks = settings.hooks as Record<
+      string,
+      { hooks: { command: string }[] }[]
+    >;
+    // Flat entry was wrapped into a matcher group
+    expect(hooks.SessionStart[0]).toHaveProperty("hooks");
+    expect(hooks.SessionStart[0].hooks[0].command).toBe(
+      "claudet worklog start",
+    );
+    // Validates against the schema
+    expect(() => HooksConfigSchema.parse(settings.hooks)).not.toThrow();
+  });
+
+  it("deduplicates after migration", () => {
+    const initial = {
+      hooks: {
+        SessionStart: [
+          // Flat entry (legacy)
+          { type: "command", command: "claudet worklog start", timeout: 10 },
+          // Matcher group (correct, duplicate)
+          {
+            hooks: [
+              {
+                type: "command",
+                command: "claudet worklog start",
+                timeout: 10,
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    const { settings, changed } = mergeWorklogHooks(
+      initial as Record<string, unknown>,
+    );
+
+    expect(changed).toBe(true);
+    const hooks = settings.hooks as Record<
+      string,
+      { hooks: { command: string }[] }[]
+    >;
+    // Only one matcher group should remain after migration + dedup
+    expect(hooks.SessionStart).toHaveLength(1);
+    expect(hooks.SessionStart[0].hooks[0].command).toBe(
+      "claudet worklog start",
+    );
+  });
+
+  it("handles mixed flat and matcher-group entries from different tools", () => {
+    const initial = {
+      hooks: {
+        SessionStart: [
+          // Flat entry from another tool
+          { type: "command", command: "other-tool init", timeout: 5 },
+          // Our matcher group
+          {
+            hooks: [
+              {
+                type: "command",
+                command: "claudet worklog start",
+                timeout: 10,
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    const { settings, changed } = mergeWorklogHooks(
+      initial as Record<string, unknown>,
+    );
+
+    expect(changed).toBe(true); // flat entry was migrated
+    const hooks = settings.hooks as Record<
+      string,
+      { hooks: { command: string }[] }[]
+    >;
+    // Both survive — different commands
+    expect(hooks.SessionStart).toHaveLength(2);
+    const commands = hooks.SessionStart.map((g) => g.hooks[0].command);
+    expect(commands).toContain("other-tool init");
+    expect(commands).toContain("claudet worklog start");
+    // All entries are valid matcher groups
+    expect(() => HooksConfigSchema.parse(settings.hooks)).not.toThrow();
   });
 });
 
