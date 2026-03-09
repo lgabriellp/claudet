@@ -80,6 +80,56 @@ export function toMergeableStatus(
 }
 
 // ---------------------------------------------------------------------------
+// Review decision helpers
+// ---------------------------------------------------------------------------
+
+export type ReviewDecision =
+  | "APPROVED"
+  | "CHANGES_REQUESTED"
+  | "REVIEW_REQUESTED"
+  | "NONE";
+
+export interface ReviewInfo {
+  user: string;
+  state: string;
+}
+
+export function computeReviewDecision(
+  reviews: ReviewInfo[],
+  requestedReviewerCount: number,
+): ReviewDecision {
+  const tracked = new Set(["APPROVED", "CHANGES_REQUESTED", "DISMISSED"]);
+  const latest = new Map<string, string>();
+  for (const r of reviews) {
+    if (tracked.has(r.state)) {
+      latest.set(r.user, r.state);
+    }
+  }
+
+  for (const state of latest.values()) {
+    if (state === "CHANGES_REQUESTED") return "CHANGES_REQUESTED";
+  }
+  if (requestedReviewerCount > 0) return "REVIEW_REQUESTED";
+  for (const state of latest.values()) {
+    if (state === "APPROVED") return "APPROVED";
+  }
+  return "NONE";
+}
+
+export function prNeedsAttention(
+  pr: {
+    mergeable: string;
+    reviewDecision: ReviewDecision;
+    state: string;
+  } | null,
+): boolean {
+  if (!pr || pr.state !== "OPEN") return false;
+  return (
+    pr.mergeable === "CONFLICTING" || pr.reviewDecision === "CHANGES_REQUESTED"
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Path derivation
 // ---------------------------------------------------------------------------
 
@@ -162,12 +212,16 @@ export function compareDatesDesc(
 export interface WorktreeSortEntry {
   target: string;
   lastAccessedAt: string;
+  needsAttention?: boolean;
 }
 
 export function compareWorktreeEntries(
   highPriorityTarget: string,
 ): (a: WorktreeSortEntry, b: WorktreeSortEntry) => number {
   return (a, b) => {
+    const aAttn = a.needsAttention ? 0 : 1;
+    const bAttn = b.needsAttention ? 0 : 1;
+    if (aAttn !== bAttn) return aAttn - bAttn;
     const aHigh = a.target === highPriorityTarget ? 0 : 1;
     const bHigh = b.target === highPriorityTarget ? 0 : 1;
     if (aHigh !== bHigh) return aHigh - bHigh;
@@ -298,8 +352,8 @@ export interface HookMatcher {
   [key: string]: unknown;
 }
 
-export function mergeWorklogHooks(settings: Record<string, HookMatcher[]>): {
-  settings: Record<string, HookMatcher[]>;
+export function mergeWorklogHooks(settings: Record<string, unknown>): {
+  settings: Record<string, unknown>;
   changed: boolean;
 } {
   const requiredHooks: Record<string, HookDefinition> = {
@@ -311,19 +365,31 @@ export function mergeWorklogHooks(settings: Record<string, HookMatcher[]>): {
     Stop: { type: "command", command: "claudet worklog tick", timeout: 10 },
   };
 
+  const hooks =
+    (settings.hooks as Record<string, HookDefinition[]> | undefined) ?? {};
   let changed = false;
 
   for (const [event, hookDef] of Object.entries(requiredHooks)) {
-    const existing: HookMatcher[] = settings[event] || [];
-    const hasOurHook = existing.some((matcher) =>
-      (matcher.hooks || []).some(
-        (h) => h.type === "command" && h.command === hookDef.command,
-      ),
+    const existing: HookDefinition[] = hooks[event] || [];
+    const hasOurHook = existing.some(
+      (h) => h.type === "command" && h.command === hookDef.command,
     );
 
     if (!hasOurHook) {
-      existing.push({ hooks: [hookDef] });
-      settings[event] = existing;
+      existing.push(hookDef);
+      hooks[event] = existing;
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    settings.hooks = hooks;
+  }
+
+  // Migrate legacy root-level hooks
+  for (const event of ["SessionStart", "Stop"]) {
+    if (Array.isArray(settings[event])) {
+      delete settings[event];
       changed = true;
     }
   }

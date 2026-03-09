@@ -29,7 +29,10 @@ import {
   loadRepoSlugs,
   mergeWorklogHooks,
   compareWorktreeEntries,
+  computeReviewDecision,
+  prNeedsAttention,
   type WorktreeSortEntry,
+  type ReviewInfo,
 } from "./helpers.js";
 
 const TEST_TMP = join(import.meta.dirname!, "..", ".test-tmp");
@@ -335,6 +338,128 @@ describe("compareDatesDesc", () => {
 });
 
 // ---------------------------------------------------------------------------
+// computeReviewDecision
+// ---------------------------------------------------------------------------
+
+describe("computeReviewDecision", () => {
+  it("returns NONE with no reviews and no requested reviewers", () => {
+    expect(computeReviewDecision([], 0)).toBe("NONE");
+  });
+
+  it("returns REVIEW_REQUESTED when there are requested reviewers", () => {
+    expect(computeReviewDecision([], 2)).toBe("REVIEW_REQUESTED");
+  });
+
+  it("returns APPROVED when a reviewer approved", () => {
+    const reviews: ReviewInfo[] = [{ user: "alice", state: "APPROVED" }];
+    expect(computeReviewDecision(reviews, 0)).toBe("APPROVED");
+  });
+
+  it("returns CHANGES_REQUESTED when a reviewer requested changes", () => {
+    const reviews: ReviewInfo[] = [
+      { user: "alice", state: "CHANGES_REQUESTED" },
+    ];
+    expect(computeReviewDecision(reviews, 0)).toBe("CHANGES_REQUESTED");
+  });
+
+  it("uses latest state per user (override earlier review)", () => {
+    const reviews: ReviewInfo[] = [
+      { user: "alice", state: "CHANGES_REQUESTED" },
+      { user: "alice", state: "APPROVED" },
+    ];
+    expect(computeReviewDecision(reviews, 0)).toBe("APPROVED");
+  });
+
+  it("returns CHANGES_REQUESTED with mixed reviewers", () => {
+    const reviews: ReviewInfo[] = [
+      { user: "alice", state: "APPROVED" },
+      { user: "bob", state: "CHANGES_REQUESTED" },
+    ];
+    expect(computeReviewDecision(reviews, 0)).toBe("CHANGES_REQUESTED");
+  });
+
+  it("ignores COMMENTED reviews", () => {
+    const reviews: ReviewInfo[] = [{ user: "alice", state: "COMMENTED" }];
+    expect(computeReviewDecision(reviews, 0)).toBe("NONE");
+  });
+
+  it("DISMISSED clears a previous approval", () => {
+    const reviews: ReviewInfo[] = [
+      { user: "alice", state: "APPROVED" },
+      { user: "alice", state: "DISMISSED" },
+    ];
+    expect(computeReviewDecision(reviews, 0)).toBe("NONE");
+  });
+
+  it("CHANGES_REQUESTED beats REVIEW_REQUESTED", () => {
+    const reviews: ReviewInfo[] = [
+      { user: "alice", state: "CHANGES_REQUESTED" },
+    ];
+    expect(computeReviewDecision(reviews, 3)).toBe("CHANGES_REQUESTED");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// prNeedsAttention
+// ---------------------------------------------------------------------------
+
+describe("prNeedsAttention", () => {
+  it("returns false for null PR", () => {
+    expect(prNeedsAttention(null)).toBe(false);
+  });
+
+  it("returns false for merged PR", () => {
+    expect(
+      prNeedsAttention({
+        state: "MERGED",
+        mergeable: "UNKNOWN",
+        reviewDecision: "NONE",
+      }),
+    ).toBe(false);
+  });
+
+  it("returns true for open PR with conflicts", () => {
+    expect(
+      prNeedsAttention({
+        state: "OPEN",
+        mergeable: "CONFLICTING",
+        reviewDecision: "NONE",
+      }),
+    ).toBe(true);
+  });
+
+  it("returns true for open PR with changes requested", () => {
+    expect(
+      prNeedsAttention({
+        state: "OPEN",
+        mergeable: "MERGEABLE",
+        reviewDecision: "CHANGES_REQUESTED",
+      }),
+    ).toBe(true);
+  });
+
+  it("returns false for open PR with review pending", () => {
+    expect(
+      prNeedsAttention({
+        state: "OPEN",
+        mergeable: "MERGEABLE",
+        reviewDecision: "REVIEW_REQUESTED",
+      }),
+    ).toBe(false);
+  });
+
+  it("returns false for open PR that is approved and mergeable", () => {
+    expect(
+      prNeedsAttention({
+        state: "OPEN",
+        mergeable: "MERGEABLE",
+        reviewDecision: "APPROVED",
+      }),
+    ).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // compareWorktreeEntries
 // ---------------------------------------------------------------------------
 
@@ -407,6 +532,91 @@ describe("compareWorktreeEntries", () => {
     entries.sort(compareWorktreeEntries("main"));
     expect(entries).toHaveLength(2);
     expect(entries[0].lastAccessedAt).toBe("2026-03-05T12:00:00Z");
+  });
+
+  it("sorts needsAttention before highPriorityTarget", () => {
+    const entries: WorktreeSortEntry[] = [
+      { target: "main", lastAccessedAt: "2026-03-05T12:00:00Z" },
+      {
+        target: "dev",
+        lastAccessedAt: "2026-03-01T12:00:00Z",
+        needsAttention: true,
+      },
+    ];
+    entries.sort(compareWorktreeEntries("main"));
+    expect(entries[0].target).toBe("dev");
+    expect(entries[0].needsAttention).toBe(true);
+  });
+
+  it("sub-sorts within needsAttention by priority then recency", () => {
+    const entries: WorktreeSortEntry[] = [
+      {
+        target: "dev",
+        lastAccessedAt: "2026-03-01T12:00:00Z",
+        needsAttention: true,
+      },
+      {
+        target: "main",
+        lastAccessedAt: "2026-03-05T12:00:00Z",
+        needsAttention: true,
+      },
+    ];
+    entries.sort(compareWorktreeEntries("main"));
+    expect(entries[0].target).toBe("main");
+  });
+
+  it("does not affect order when no entries have needsAttention", () => {
+    const entries: WorktreeSortEntry[] = [
+      { target: "dev", lastAccessedAt: "2026-03-04T10:00:00Z" },
+      { target: "main", lastAccessedAt: "2026-03-01T08:00:00Z" },
+    ];
+    entries.sort(compareWorktreeEntries("main"));
+    expect(entries[0].target).toBe("main");
+    expect(entries[1].target).toBe("dev");
+  });
+
+  it("treats undefined needsAttention as false", () => {
+    const entries: WorktreeSortEntry[] = [
+      { target: "main", lastAccessedAt: "2026-03-05T12:00:00Z" },
+      {
+        target: "dev",
+        lastAccessedAt: "2026-03-01T12:00:00Z",
+        needsAttention: true,
+      },
+    ];
+    entries.sort(compareWorktreeEntries("main"));
+    expect(entries[0].needsAttention).toBe(true);
+    expect(entries[1].needsAttention).toBeUndefined();
+  });
+
+  it("sorts full realistic list with mixed attention correctly", () => {
+    const entries: WorktreeSortEntry[] = [
+      { target: "dev", lastAccessedAt: "2026-03-04T10:00:00Z" },
+      {
+        target: "dev",
+        lastAccessedAt: "2026-03-02T10:00:00Z",
+        needsAttention: true,
+      },
+      { target: "main", lastAccessedAt: "2026-03-05T12:00:00Z" },
+      {
+        target: "main",
+        lastAccessedAt: "2026-03-01T08:00:00Z",
+        needsAttention: true,
+      },
+      { target: "dev", lastAccessedAt: EPOCH },
+    ];
+    entries.sort(compareWorktreeEntries("main"));
+    expect(
+      entries.map(
+        (e) => `${e.needsAttention ? "!" : " "}${e.target}:${e.lastAccessedAt}`,
+      ),
+    ).toEqual([
+      "!main:2026-03-01T08:00:00Z",
+      "!dev:2026-03-02T10:00:00Z",
+      " main:2026-03-05T12:00:00Z",
+      " dev:2026-03-04T10:00:00Z",
+      " dev:1970-01-01T00:00:00.000Z",
+    ]);
   });
 });
 
@@ -733,16 +943,42 @@ describe("mergeWorklogHooks", () => {
     const { settings, changed } = mergeWorklogHooks({});
 
     expect(changed).toBe(true);
-    expect(settings.SessionStart).toHaveLength(1);
-    expect(settings.SessionStart[0].hooks![0].command).toBe(
-      "claudet worklog start",
-    );
-    expect(settings.Stop).toHaveLength(1);
-    expect(settings.Stop[0].hooks![0].command).toBe("claudet worklog tick");
+    const hooks = settings.hooks as Record<
+      string,
+      { type: string; command: string; timeout: number }[]
+    >;
+    expect(hooks.SessionStart).toHaveLength(1);
+    expect(hooks.SessionStart[0].command).toBe("claudet worklog start");
+    expect(hooks.Stop).toHaveLength(1);
+    expect(hooks.Stop[0].command).toBe("claudet worklog tick");
   });
 
   it("detects existing hooks and doesn't duplicate", () => {
     const initial = {
+      hooks: {
+        SessionStart: [
+          { type: "command", command: "claudet worklog start", timeout: 10 },
+        ],
+        Stop: [
+          { type: "command", command: "claudet worklog tick", timeout: 10 },
+        ],
+      },
+    };
+
+    const { settings, changed } = mergeWorklogHooks(initial);
+
+    expect(changed).toBe(false);
+    const hooks = settings.hooks as Record<
+      string,
+      { type: string; command: string; timeout: number }[]
+    >;
+    expect(hooks.SessionStart).toHaveLength(1);
+    expect(hooks.Stop).toHaveLength(1);
+  });
+
+  it("migrates legacy root-level hooks to hooks object", () => {
+    const initial = {
+      permissions: { allow: [] },
       SessionStart: [
         {
           hooks: [
@@ -758,39 +994,41 @@ describe("mergeWorklogHooks", () => {
         },
       ],
     };
-
-    const { settings, changed } = mergeWorklogHooks(initial);
-
-    expect(changed).toBe(false);
-    expect(settings.SessionStart).toHaveLength(1);
-    expect(settings.Stop).toHaveLength(1);
+    const { settings, changed } = mergeWorklogHooks(
+      initial as Record<string, unknown>,
+    );
+    expect(changed).toBe(true);
+    const hooks = settings.hooks as Record<string, { command: string }[]>;
+    expect(hooks.SessionStart[0].command).toBe("claudet worklog start");
+    expect(hooks.Stop[0].command).toBe("claudet worklog tick");
+    expect(settings).not.toHaveProperty("SessionStart");
+    expect(settings).not.toHaveProperty("Stop");
+    expect(settings).toHaveProperty("permissions");
   });
 
   it("merges into settings with other existing hooks", () => {
     const initial = {
-      SessionStart: [
-        {
-          hooks: [
-            { type: "command", command: "some-other-tool start", timeout: 5 },
-          ],
-        },
-      ],
+      hooks: {
+        SessionStart: [
+          { type: "command", command: "some-other-tool start", timeout: 5 },
+        ],
+      },
     };
 
     const { settings, changed } = mergeWorklogHooks(initial);
 
     expect(changed).toBe(true);
+    const hooks = settings.hooks as Record<
+      string,
+      { type: string; command: string; timeout: number }[]
+    >;
     // Original hook preserved
-    expect(settings.SessionStart).toHaveLength(2);
-    expect(settings.SessionStart[0].hooks![0].command).toBe(
-      "some-other-tool start",
-    );
+    expect(hooks.SessionStart).toHaveLength(2);
+    expect(hooks.SessionStart[0].command).toBe("some-other-tool start");
     // Our hook added
-    expect(settings.SessionStart[1].hooks![0].command).toBe(
-      "claudet worklog start",
-    );
+    expect(hooks.SessionStart[1].command).toBe("claudet worklog start");
     // Stop added fresh
-    expect(settings.Stop).toHaveLength(1);
+    expect(hooks.Stop).toHaveLength(1);
   });
 });
 

@@ -36,9 +36,13 @@ import {
   loadRepoSlugs,
   mergeWorklogHooks,
   compareWorktreeEntries,
+  computeReviewDecision,
+  prNeedsAttention,
   type CreateFlags,
   type HookDefinition,
   type HookMatcher,
+  type ReviewDecision,
+  type ReviewInfo,
 } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -226,6 +230,7 @@ interface PRStatus {
   url: string;
   number: number;
   mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+  reviewDecision: ReviewDecision;
 }
 
 interface RepoInfo {
@@ -390,15 +395,30 @@ function statusBadge(status: string, pad = 0): string {
   }
 }
 
+function reviewSuffix(pr: PRStatus): string {
+  switch (pr.reviewDecision) {
+    case "APPROVED":
+      return pc.green("✓ approved");
+    case "CHANGES_REQUESTED":
+      return pc.yellow("⚠ changes requested");
+    case "REVIEW_REQUESTED":
+      return pc.dim("⏳ review pending");
+    default:
+      return "";
+  }
+}
+
 function prBadge(pr: PRStatus | null, showConflict = true): string {
   if (!pr) return pc.dim("no PR");
   const conflict =
     showConflict && pr.mergeable === "CONFLICTING"
       ? `  ${pc.red("⚠ conflicts")}`
       : "";
+  const review = pr.state === "OPEN" ? reviewSuffix(pr) : "";
+  const reviewPart = review ? `  ${review}` : "";
   switch (pr.state) {
     case "OPEN":
-      return pc.green(`PR #${pr.number} open`) + conflict;
+      return pc.green(`PR #${pr.number} open`) + conflict + reviewPart;
     case "MERGED":
       return pc.magenta(`PR #${pr.number} merged`);
     case "CLOSED":
@@ -595,22 +615,39 @@ async function fetchPRStatuses(
     onPhase?.(`Checking merge status… (${openPRs.length} open)`);
   }
   const mergeableMap = new Map<string, boolean | null>();
-  const mergeableResults = await Promise.all(
+  const reviewDecisionMap = new Map<string, ReviewDecision>();
+  const detailResults = await Promise.all(
     openPRs.map(async ([name, pr]) => {
-      try {
-        const { data } = await octokit.rest.pulls.get({
-          owner: info.owner,
-          repo: info.repo,
-          pull_number: pr.number,
-        });
-        return { name, mergeable: data.mergeable };
-      } catch {
-        return { name, mergeable: null };
-      }
+      const [prDetail, reviewList] = await Promise.all([
+        octokit.rest.pulls
+          .get({ owner: info.owner, repo: info.repo, pull_number: pr.number })
+          .then((r) => r.data)
+          .catch(() => null),
+        octokit.rest.pulls
+          .listReviews({
+            owner: info.owner,
+            repo: info.repo,
+            pull_number: pr.number,
+            per_page: 100,
+          })
+          .then((r) => r.data)
+          .catch(() => []),
+      ]);
+      const reviews: ReviewInfo[] = reviewList.map((r) => ({
+        user: r.user?.login ?? "",
+        state: r.state,
+      }));
+      const requestedReviewerCount = pr.requested_reviewers?.length ?? 0;
+      return {
+        name,
+        mergeable: prDetail?.mergeable ?? null,
+        reviewDecision: computeReviewDecision(reviews, requestedReviewerCount),
+      };
     }),
   );
-  for (const { name, mergeable } of mergeableResults) {
+  for (const { name, mergeable, reviewDecision } of detailResults) {
     mergeableMap.set(name, mergeable);
+    reviewDecisionMap.set(name, reviewDecision);
   }
 
   for (const [name] of entries) {
@@ -625,11 +662,13 @@ async function fetchPRStatuses(
         ? "OPEN"
         : "CLOSED";
     const mergeable = toMergeableStatus(mergeableMap.get(name));
+    const reviewDecision = reviewDecisionMap.get(name) ?? "NONE";
     result.set(name, {
       state,
       url: pr.html_url,
       number: pr.number,
       mergeable,
+      reviewDecision,
     });
   }
 
@@ -929,43 +968,19 @@ async function pushAndCreateDraftPR(
 
 // Race condition note: concurrent settings writes are acceptable for single-user CLI.
 function ensureWorklogHooks(): void {
-  const settings = tryParseJson<Record<string, HookMatcher[]>>(
+  const settings = tryParseJson<Record<string, unknown>>(
     tryReadFileSync(GLOBAL_SETTINGS_FILE),
     {},
   );
 
-  const requiredHooks: Record<string, HookDefinition> = {
-    SessionStart: {
-      type: "command",
-      command: "claudet worklog start",
-      timeout: 10,
-    },
-    Stop: { type: "command", command: "claudet worklog tick", timeout: 10 },
-  };
-
-  let changed = false;
-
-  for (const [event, hookDef] of Object.entries(requiredHooks)) {
-    const existing: HookMatcher[] = settings[event] || [];
-    const hasOurHook = existing.some((matcher) =>
-      (matcher.hooks || []).some(
-        (h) => h.type === "command" && h.command === hookDef.command,
-      ),
-    );
-
-    if (!hasOurHook) {
-      existing.push({ hooks: [hookDef] });
-      settings[event] = existing;
-      changed = true;
-    }
-  }
+  const { settings: updated, changed } = mergeWorklogHooks(settings);
 
   if (changed) {
     const dir = dirname(GLOBAL_SETTINGS_FILE);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     writeFileSync(
       GLOBAL_SETTINGS_FILE,
-      JSON.stringify(settings, null, 2) + "\n",
+      JSON.stringify(updated, null, 2) + "\n",
     );
   }
 }
@@ -985,7 +1000,6 @@ Read the plan file at ${planPath} at session start.
 }
 
 function launchClaude(cwd: string, planPath?: string): void {
-  ensureWorklogHooks();
   if (planPath) {
     writeSessionRule(cwd, planPath);
   }
@@ -1342,6 +1356,7 @@ async function interactiveFlow(): Promise<void> {
 
   const dataDir = resolveDataDir();
   cleanStaleSessionFiles(tmpdir());
+  ensureWorklogHooks();
 
   const { slug, repoRoot } = await pickRepo(dataDir);
 
@@ -1379,6 +1394,22 @@ async function interactiveFlow(): Promise<void> {
   );
   prSpinner.stop(`Loaded ${activeEntries.length} PRs.`);
 
+  // Re-sort with needsAttention now that PR data is available
+  activeEntries.sort(([nameA, a], [nameB, b]) =>
+    compareWorktreeEntries(highPriorityTarget)(
+      {
+        target: a.target,
+        lastAccessedAt: a.lastAccessedAt ?? EPOCH,
+        needsAttention: prNeedsAttention(prStatuses.get(nameA) ?? null),
+      },
+      {
+        target: b.target,
+        lastAccessedAt: b.lastAccessedAt ?? EPOCH,
+        needsAttention: prNeedsAttention(prStatuses.get(nameB) ?? null),
+      },
+    ),
+  );
+
   // Build select options with columnar layout
   const STATUS_PAD = 12;
   const CREATE_NEW = "__create_new__";
@@ -1390,14 +1421,16 @@ async function interactiveFlow(): Promise<void> {
     ...activeEntries.map(([name, entry]) => {
       const status = getStatusFromPlan(planFilePath(dataDir, slug, name));
       const pr = prStatuses.get(name) ?? null;
-      const conflictHint =
-        pr?.mergeable === "CONFLICTING" ? pc.red("⚠ conflicts") : "";
+      const hints: string[] = [];
+      if (pr?.mergeable === "CONFLICTING") hints.push(pc.red("⚠ conflicts"));
+      if (pr?.reviewDecision === "CHANGES_REQUESTED")
+        hints.push(pc.yellow("⚠ changes requested"));
       return {
         value: name,
         label:
           `${statusBadge(status, STATUS_PAD)} ${name.padEnd(maxNameLen + 2)}` +
           `${pc.dim(entry.branch.padEnd(maxBranchLen + 2))}${prBadge(pr, false)}`,
-        hint: conflictHint,
+        hint: hints.join("  "),
       };
     }),
     {
