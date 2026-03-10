@@ -959,6 +959,91 @@ async function worklogTick(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Worklog migration — backfill progress entries from plan files
+// ---------------------------------------------------------------------------
+
+function worklogMigrate(): void {
+  const dataDir = resolveDataDir();
+  const slugs = loadRepoSlugs(dataDir);
+  let totalMigrated = 0;
+
+  for (const slug of slugs) {
+    const plansDir = plansDirPath(dataDir, slug);
+    if (!existsSync(plansDir)) continue;
+
+    let planFiles: string[];
+    try {
+      planFiles = readdirSync(plansDir).filter((f) => f.endsWith(".md"));
+    } catch {
+      continue;
+    }
+
+    for (const file of planFiles) {
+      const planName = file.replace(/\.md$/, "");
+      const pPath = resolve(plansDir, file);
+      const entries = getProgressEntries(pPath);
+      if (entries.length === 0) continue;
+
+      // Check what's already in the worklog for this plan
+      const wlPath = worklogPath(dataDir);
+      const existingLines = existsSync(wlPath)
+        ? tryReadFileSync(wlPath)
+            .split("\n")
+            .filter(Boolean)
+            .filter((line) => {
+              const parsed = tryParseJson<Record<string, unknown>>(line, {});
+              return parsed.event === "progress" && parsed.plan === planName;
+            })
+            .map((line) => {
+              const parsed = tryParseJson<Record<string, unknown>>(line, {});
+              return parsed.message as string;
+            })
+        : [];
+      const existingSet = new Set(existingLines);
+
+      let migrated = 0;
+      for (const entry of entries) {
+        if (existingSet.has(entry)) continue;
+
+        // Try to parse date from the entry (e.g. "2026-03-05 12:47: ..." or "2026-03-05: ...")
+        const dateMatch = entry.match(
+          /^(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}))?\s*:/,
+        );
+        const ts = dateMatch
+          ? new Date(
+              dateMatch[2]
+                ? `${dateMatch[1]}T${dateMatch[2]}:00`
+                : `${dateMatch[1]}T00:00:00`,
+            ).getTime()
+          : 0;
+
+        appendWorklog(dataDir, {
+          event: "progress",
+          timestamp: ts,
+          datetime: ts ? new Date(ts).toISOString() : null,
+          plan: planName,
+          slug,
+          message: entry,
+          migrated: true,
+        });
+        migrated++;
+      }
+
+      if (migrated > 0) {
+        console.log(`  ${slug}/${planName}: ${migrated} entries`);
+        totalMigrated += migrated;
+      }
+    }
+  }
+
+  if (totalMigrated === 0) {
+    console.log("  No new entries to migrate.");
+  } else {
+    console.log(`\nMigrated ${totalMigrated} progress entries to worklog.`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Draft PR creation
 // ---------------------------------------------------------------------------
 
@@ -2250,6 +2335,9 @@ switch (subcommand) {
           console.error(err);
           process.exit(1);
         });
+        break;
+      case "migrate":
+        worklogMigrate();
         break;
       default:
         console.error(`Unknown worklog command: ${subArg}`);
