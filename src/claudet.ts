@@ -32,6 +32,7 @@ import {
   parseDuration,
   compareDatesDesc,
   getStatusFromPlan as getStatusFromPlanContent,
+  getProgressEntries as getProgressEntriesContent,
   getLastProgress as getLastProgressContent,
   scanForGitRepos,
   validateBranchName,
@@ -229,6 +230,7 @@ interface SessionState {
   planPath: string;
   startTime: number;
   lastTick: number;
+  progressCount: number;
 }
 
 interface PRStatus {
@@ -505,6 +507,11 @@ pending
 function getStatusFromPlan(pPath: string): string {
   if (!existsSync(pPath)) return "unknown";
   return getStatusFromPlanContent(readFileSync(pPath, "utf-8"));
+}
+
+function getProgressEntries(pPath: string): string[] {
+  if (!existsSync(pPath)) return [];
+  return getProgressEntriesContent(readFileSync(pPath, "utf-8"));
 }
 
 function getLastProgress(pPath: string): string | null {
@@ -861,12 +868,14 @@ async function worklogStart(): Promise<void> {
   if (!existsSync(pPath)) return;
 
   const now = Date.now();
-  const state = {
+  const progressEntries = getProgressEntries(pPath);
+  const state: SessionState = {
     slug: wtMatch.slug,
     plan: wtMatch.name,
     planPath: pPath,
     startTime: now,
     lastTick: now,
+    progressCount: progressEntries.length,
   };
   writeFileSync(sessionStatePath(sessionId), JSON.stringify(state));
 
@@ -917,6 +926,22 @@ async function worklogTick(): Promise<void> {
     }
   }
 
+  // Log new progress entries
+  const progressEntries = getProgressEntries(state.planPath);
+  const prevCount = state.progressCount ?? 0;
+  if (progressEntries.length > prevCount) {
+    const newEntries = progressEntries.slice(prevCount);
+    for (const entry of newEntries) {
+      appendWorklog(dataDir, {
+        event: "progress",
+        timestamp: now,
+        datetime: new Date(now).toISOString(),
+        plan: state.plan,
+        message: entry,
+      });
+    }
+  }
+
   const planStatus = getStatusFromPlan(state.planPath);
   const elapsedMs = now - state.startTime;
   appendWorklog(dataDir, {
@@ -927,8 +952,9 @@ async function worklogTick(): Promise<void> {
     planStatus,
   });
 
-  // Update lastTick in state
+  // Update lastTick + progressCount in state
   state.lastTick = now;
+  state.progressCount = progressEntries.length;
   writeFileSync(statePath, JSON.stringify(state));
 }
 

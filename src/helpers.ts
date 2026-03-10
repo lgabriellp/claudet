@@ -271,13 +271,18 @@ export function compareWorktreeEntries(
   };
 }
 
-export function getLastProgress(content: string): string | null {
+export function getProgressEntries(content: string): string[] {
   const progressSection = content.split("## Progress")[1];
-  if (!progressSection) return null;
-  const lines = progressSection
+  if (!progressSection) return [];
+  return progressSection
     .split("\n")
-    .filter((l) => l.startsWith("- ") && !l.startsWith("<!-- "));
-  return lines.length > 0 ? lines[lines.length - 1].replace(/^- /, "") : null;
+    .filter((l) => l.startsWith("- ") && !l.startsWith("<!-- "))
+    .map((l) => l.replace(/^- /, ""));
+}
+
+export function getLastProgress(content: string): string | null {
+  const entries = getProgressEntries(content);
+  return entries.length > 0 ? entries[entries.length - 1] : null;
 }
 
 // ---------------------------------------------------------------------------

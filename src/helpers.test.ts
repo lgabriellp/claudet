@@ -25,6 +25,7 @@ import {
   parseDuration,
   compareDatesDesc,
   getStatusFromPlan,
+  getProgressEntries,
   getLastProgress,
   scanForGitRepos,
   validateBranchName,
@@ -787,6 +788,37 @@ describe("getLastProgress", () => {
   it("returns null when only comments exist", () => {
     const content = "## Progress\n<!-- Append-only log -->\n";
     expect(getLastProgress(content)).toBe(null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getProgressEntries
+// ---------------------------------------------------------------------------
+
+describe("getProgressEntries", () => {
+  it("returns all progress entries", () => {
+    const content =
+      "## Progress\n- 2026-01-01 10:00: First\n- 2026-01-02 09:00: Second\n";
+    expect(getProgressEntries(content)).toEqual([
+      "2026-01-01 10:00: First",
+      "2026-01-02 09:00: Second",
+    ]);
+  });
+
+  it("returns empty array when no progress section", () => {
+    const content = "# Plan\n\n## Status\npending\n";
+    expect(getProgressEntries(content)).toEqual([]);
+  });
+
+  it("skips HTML comments", () => {
+    const content =
+      "## Progress\n<!-- log -->\n<!-- more -->\n- 2026-01-01: Entry\n";
+    expect(getProgressEntries(content)).toEqual(["2026-01-01: Entry"]);
+  });
+
+  it("returns empty array when only comments exist", () => {
+    const content = "## Progress\n<!-- Append-only log -->\n";
+    expect(getProgressEntries(content)).toEqual([]);
   });
 });
 
