@@ -36,6 +36,7 @@ import {
   compareWorktreeEntries,
   computeReviewDecision,
   prNeedsAttention,
+  upsertPlanSection,
   type WorktreeSortEntry,
   type ReviewInfo,
 } from "./helpers.js";
@@ -1338,5 +1339,122 @@ describe("e2e smoke test", () => {
       encoding: "utf-8",
       timeout: 30_000,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// upsertPlanSection
+// ---------------------------------------------------------------------------
+
+describe("upsertPlanSection", () => {
+  const plan = [
+    "# My Plan",
+    "",
+    "## Target Branch",
+    "dev",
+    "",
+    "## Key Files",
+    "- src/foo.ts",
+    "",
+    "## Status",
+    "pending",
+    "",
+    "## Progress",
+    "- entry 1",
+    "",
+  ].join("\n");
+
+  it("inserts a new section after the anchor", () => {
+    const result = upsertPlanSection(
+      plan,
+      "Branch",
+      "feature/my-branch",
+      "Target Branch",
+    );
+    expect(result).toContain("## Branch\nfeature/my-branch\n");
+    // Should appear between Target Branch and Key Files
+    const branchIdx = result.indexOf("## Branch");
+    const targetIdx = result.indexOf("## Target Branch");
+    const keyFilesIdx = result.indexOf("## Key Files");
+    expect(branchIdx).toBeGreaterThan(targetIdx);
+    expect(branchIdx).toBeLessThan(keyFilesIdx);
+  });
+
+  it("updates an existing section", () => {
+    const withBranch = upsertPlanSection(
+      plan,
+      "Branch",
+      "feature/old",
+      "Target Branch",
+    );
+    const updated = upsertPlanSection(
+      withBranch,
+      "Branch",
+      "feature/new",
+      "Target Branch",
+    );
+    expect(updated).toContain("## Branch\nfeature/new\n");
+    expect(updated).not.toContain("feature/old");
+    // Only one Branch heading
+    expect(updated.match(/## Branch/g)?.length).toBe(1);
+  });
+
+  it("removes a section when body is null", () => {
+    const withBranch = upsertPlanSection(
+      plan,
+      "Branch",
+      "feature/x",
+      "Target Branch",
+    );
+    expect(withBranch).toContain("## Branch");
+    const removed = upsertPlanSection(
+      withBranch,
+      "Branch",
+      null,
+      "Target Branch",
+    );
+    expect(removed).not.toContain("## Branch");
+    // Other sections remain
+    expect(removed).toContain("## Target Branch");
+    expect(removed).toContain("## Key Files");
+    expect(removed).toContain("## Status");
+  });
+
+  it("returns content unchanged when anchor not found", () => {
+    const result = upsertPlanSection(
+      plan,
+      "Branch",
+      "feature/x",
+      "Nonexistent",
+    );
+    expect(result).toBe(plan);
+  });
+
+  it("removes non-existent section without error", () => {
+    const result = upsertPlanSection(plan, "Branch", null, "Target Branch");
+    expect(result).toBe(plan);
+  });
+
+  it("handles multi-line section body", () => {
+    const body =
+      "- **Number:** #42\n- **State:** OPEN\n- **URL:** https://github.com/pr/42";
+    const result = upsertPlanSection(plan, "PR", body, "Target Branch");
+    expect(result).toContain("## PR\n" + body + "\n");
+  });
+
+  it("is idempotent for same content", () => {
+    const once = upsertPlanSection(
+      plan,
+      "Branch",
+      "feature/x",
+      "Target Branch",
+    );
+    const twice = upsertPlanSection(
+      once,
+      "Branch",
+      "feature/x",
+      "Target Branch",
+    );
+    expect(twice).toBe(once);
   });
 });

@@ -63,6 +63,70 @@ export function managedSectionExtract(claudeMd: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// Plan file section helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Insert or update a `## Heading` section in a plan file.
+ * - If the section already exists, replace its body.
+ * - Otherwise insert it right after `afterHeading`'s body (before the next ##).
+ * Body is trimmed; pass `null` to remove the section entirely.
+ */
+export function upsertPlanSection(
+  content: string,
+  heading: string,
+  body: string | null,
+  afterHeading: string,
+): string {
+  // Match existing section: heading line, then everything until next ## or EOF
+  const sectionRe = new RegExp(
+    `^## ${escapeRegex(heading)}\\s*\\n[\\s\\S]*?(?=\\n## |$)`,
+    "m",
+  );
+  const existing = sectionRe.exec(content);
+
+  if (body === null) {
+    // Remove the section if it exists
+    if (!existing) return content;
+    return (
+      content.slice(0, existing.index) +
+      content.slice(existing.index + existing[0].length).replace(/^\n/, "")
+    );
+  }
+
+  const newSection = `## ${heading}\n${body}\n`;
+
+  if (existing) {
+    // Replace existing section
+    return (
+      content.slice(0, existing.index) +
+      newSection +
+      content.slice(existing.index + existing[0].length).replace(/^\n/, "")
+    );
+  }
+
+  // Insert after the anchor heading's body (before the next ## heading)
+  const anchorRe = new RegExp(
+    `^## ${escapeRegex(afterHeading)}\\s*\\n[\\s\\S]*?(?=\\n## )`,
+    "m",
+  );
+  const anchorMatch = anchorRe.exec(content);
+  if (!anchorMatch) return content; // anchor not found, leave unchanged
+
+  const insertPos = anchorMatch.index + anchorMatch[0].length;
+  return (
+    content.slice(0, insertPos) +
+    "\n\n" +
+    newSection +
+    content.slice(insertPos).replace(/^\n+/, "\n")
+  );
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// ---------------------------------------------------------------------------
 // `claudet create` flag parsing
 // ---------------------------------------------------------------------------
 
