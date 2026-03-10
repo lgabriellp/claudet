@@ -7,6 +7,7 @@
     "claudet": "./bin/claudet"
   },
   "scripts": {
+    "setup": "bash scripts/install.sh",
     "dev": "tsx src/claudet.ts",
     "typecheck": "tsgo --noEmit",
     "test": "vitest run",
