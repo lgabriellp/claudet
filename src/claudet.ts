@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   statSync,
   symlinkSync,
   unlinkSync,
@@ -35,6 +36,9 @@ import {
   cleanStaleSessionFiles,
   loadRepoSlugs,
   mergeWorklogHooks,
+  computeContextHash,
+  managedSectionReplace,
+  managedSectionExtract,
   compareWorktreeEntries,
   computeReviewDecision,
   prNeedsAttention,
@@ -986,6 +990,76 @@ function ensureWorklogHooks(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Context doc management
+// ---------------------------------------------------------------------------
+
+const CLAUDET_DIR = resolve(HOME, ".claude", "claudet");
+const CLAUDE_MD_PATH = resolve(HOME, ".claude", "CLAUDE.md");
+const TEMPLATES_DIR = resolve(__dirname, "templates");
+
+function ensureContextDocs(): { updated: boolean; actions: string[] } {
+  const actions: string[] = [];
+
+  // Phase 1 — Migrate legacy files
+  for (const name of ["planning-guide.md", "worktree-workflow.md"]) {
+    const legacy = resolve(HOME, ".claude", name);
+    const target = resolve(CLAUDET_DIR, name);
+    if (existsSync(legacy) && !existsSync(target)) {
+      if (!existsSync(CLAUDET_DIR)) mkdirSync(CLAUDET_DIR, { recursive: true });
+      writeFileSync(target, readFileSync(legacy, "utf-8"));
+      renameSync(legacy, legacy + ".migrated-to-claudet");
+      actions.push(`migrated ${name} → claudet/`);
+    }
+  }
+
+  // Phase 2 — Template sync
+  if (!existsSync(CLAUDET_DIR)) mkdirSync(CLAUDET_DIR, { recursive: true });
+  for (const name of ["planning-guide.md", "worktree-workflow.md"]) {
+    const templatePath = resolve(TEMPLATES_DIR, name);
+    const installedPath = resolve(CLAUDET_DIR, name);
+    const templateContent = readFileSync(templatePath, "utf-8");
+    const templateHash = computeContextHash(templateContent);
+    const installedHash = existsSync(installedPath)
+      ? computeContextHash(readFileSync(installedPath, "utf-8"))
+      : "";
+    if (templateHash !== installedHash) {
+      writeFileSync(installedPath, templateContent);
+      actions.push(`updated claudet/${name}`);
+    }
+  }
+
+  // Phase 3 — CLAUDE.md managed section
+  const sectionTemplate = readFileSync(
+    resolve(TEMPLATES_DIR, "claude-md-section.md"),
+    "utf-8",
+  );
+  const sectionHash = computeContextHash(sectionTemplate);
+  const claudeMd = existsSync(CLAUDE_MD_PATH)
+    ? readFileSync(CLAUDE_MD_PATH, "utf-8")
+    : "";
+  const existing = managedSectionExtract(claudeMd);
+  const existingHash = existing ? computeContextHash(existing) : "";
+  if (sectionHash !== existingHash) {
+    const updated = managedSectionReplace(claudeMd, sectionTemplate);
+    writeFileSync(CLAUDE_MD_PATH, updated);
+    actions.push("updated CLAUDE.md managed section");
+  }
+
+  return { updated: actions.length > 0, actions };
+}
+
+function contextCommand(): void {
+  const { actions } = ensureContextDocs();
+  if (actions.length > 0) {
+    for (const action of actions) {
+      console.log(`  ${action}`);
+    }
+  } else {
+    console.log("Context docs are up to date.");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Launch claude
 // ---------------------------------------------------------------------------
 
@@ -1357,6 +1431,7 @@ async function interactiveFlow(): Promise<void> {
   const dataDir = resolveDataDir();
   cleanStaleSessionFiles(tmpdir());
   ensureWorklogHooks();
+  ensureContextDocs();
 
   const { slug, repoRoot } = await pickRepo(dataDir);
 
@@ -1981,6 +2056,9 @@ switch (subcommand) {
       process.exit(1);
     });
     break;
+  case "context":
+    contextCommand();
+    break;
   case "statusline":
     statusLine().catch((err) => {
       console.error(err);
@@ -2025,6 +2103,7 @@ switch (subcommand) {
     claudet init             Configure global settings (scan dirs, data dir)
     claudet create           Non-interactive: create worktree + plan (JSON output)
     claudet clean            Select worktrees to archive
+    claudet context          Sync context docs to ~/.claude/claudet/
     claudet statusline       Output status line (reads JSON from stdin)
     claudet worklog start    Log session start (called by hook)
     claudet worklog tick     Log tick + update time (called by hook)

@@ -13,6 +13,9 @@ import { join } from "path";
 import {
   tryParseJson,
   expandHome,
+  computeContextHash,
+  managedSectionReplace,
+  managedSectionExtract,
   toMergeableStatus,
   deriveRepoSlug,
   deriveShortName,
@@ -81,6 +84,118 @@ describe("expandHome", () => {
 
   it("expands bare tilde", () => {
     expect(expandHome("~")).toBe(home);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// computeContextHash
+// ---------------------------------------------------------------------------
+
+describe("computeContextHash", () => {
+  it("returns consistent results for the same content", () => {
+    expect(computeContextHash("hello world")).toBe(
+      computeContextHash("hello world"),
+    );
+  });
+
+  it("returns different hashes for different content", () => {
+    expect(computeContextHash("hello")).not.toBe(computeContextHash("world"));
+  });
+
+  it("returns a 12-char hex string", () => {
+    expect(computeContextHash("test")).toMatch(/^[0-9a-f]{12}$/);
+  });
+
+  it("handles empty string", () => {
+    expect(computeContextHash("")).toMatch(/^[0-9a-f]{12}$/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// managedSectionReplace
+// ---------------------------------------------------------------------------
+
+describe("managedSectionReplace", () => {
+  it("appends when no markers exist", () => {
+    const result = managedSectionReplace("user content\n", "managed");
+    expect(result).toContain("user content");
+    expect(result).toContain("<!-- claudet:start -->");
+    expect(result).toContain("managed");
+    expect(result).toContain("<!-- claudet:end -->");
+  });
+
+  it("replaces between existing markers", () => {
+    const input =
+      "before\n<!-- claudet:start -->\nold\n<!-- claudet:end -->\nafter\n";
+    const result = managedSectionReplace(input, "new");
+    expect(result).toContain("before\n");
+    expect(result).toContain("new");
+    expect(result).not.toContain("old");
+    expect(result).toContain("after\n");
+  });
+
+  it("preserves surrounding content", () => {
+    const input =
+      "# Header\nsome stuff\n<!-- claudet:start -->\nold\n<!-- claudet:end -->\n# Footer\n";
+    const result = managedSectionReplace(input, "replaced");
+    expect(result).toContain("# Header\nsome stuff\n");
+    expect(result).toContain("\n# Footer\n");
+  });
+
+  it("handles empty input", () => {
+    const result = managedSectionReplace("", "section");
+    expect(result).toContain("<!-- claudet:start -->");
+    expect(result).toContain("section");
+    expect(result).toContain("<!-- claudet:end -->");
+  });
+
+  it("handles input without trailing newline", () => {
+    const result = managedSectionReplace("no newline", "section");
+    expect(result).toContain("no newline");
+    expect(result).toContain("<!-- claudet:start -->");
+  });
+
+  it("is idempotent", () => {
+    const input = "user content\n";
+    const result1 = managedSectionReplace(input, "managed section");
+    const result2 = managedSectionReplace(result1, "managed section");
+    expect(result1).toBe(result2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// managedSectionExtract
+// ---------------------------------------------------------------------------
+
+describe("managedSectionExtract", () => {
+  it("extracts content between markers", () => {
+    const input =
+      "before\n<!-- claudet:start -->\nmanaged content\n<!-- claudet:end -->\nafter\n";
+    expect(managedSectionExtract(input)).toBe("managed content");
+  });
+
+  it("returns null when no markers", () => {
+    expect(managedSectionExtract("no markers here")).toBeNull();
+  });
+
+  it("returns null when only start marker", () => {
+    expect(
+      managedSectionExtract("before\n<!-- claudet:start -->\nstuff"),
+    ).toBeNull();
+  });
+
+  it("returns null when markers are reversed", () => {
+    expect(
+      managedSectionExtract(
+        "<!-- claudet:end -->\ncontent\n<!-- claudet:start -->",
+      ),
+    ).toBeNull();
+  });
+
+  it("trims whitespace from extracted content", () => {
+    const input =
+      "<!-- claudet:start -->\n  spaced content  \n<!-- claudet:end -->";
+    expect(managedSectionExtract(input)).toBe("spaced content");
   });
 });
 

@@ -2,6 +2,7 @@
 // Pure helper functions extracted from claudet.ts for testability
 // ---------------------------------------------------------------------------
 
+import { createHash } from "crypto";
 import { z } from "zod";
 
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
@@ -20,6 +21,45 @@ export function tryParseJson<T>(str: string, fallback: T): T {
 
 export function expandHome(input: string): string {
   return input.replace(/^~(?=$|\/)/, HOME);
+}
+
+// ---------------------------------------------------------------------------
+// Context doc helpers
+// ---------------------------------------------------------------------------
+
+const MARKER_START = "<!-- claudet:start -->";
+const MARKER_END = "<!-- claudet:end -->";
+
+export function computeContextHash(content: string): string {
+  return createHash("sha256").update(content).digest("hex").slice(0, 12);
+}
+
+export function managedSectionReplace(
+  claudeMd: string,
+  section: string,
+): string {
+  const block = `${MARKER_START}\n${section}\n${MARKER_END}`;
+  const startIdx = claudeMd.indexOf(MARKER_START);
+  const endIdx = claudeMd.indexOf(MARKER_END);
+
+  if (startIdx === -1 || endIdx === -1 || endIdx < startIdx) {
+    const sep = claudeMd.length > 0 && !claudeMd.endsWith("\n") ? "\n\n" : "\n";
+    return claudeMd + sep + block + "\n";
+  }
+
+  return (
+    claudeMd.slice(0, startIdx) +
+    block +
+    claudeMd.slice(endIdx + MARKER_END.length)
+  );
+}
+
+export function managedSectionExtract(claudeMd: string): string | null {
+  const startIdx = claudeMd.indexOf(MARKER_START);
+  const endIdx = claudeMd.indexOf(MARKER_END);
+  if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) return null;
+  const inner = claudeMd.slice(startIdx + MARKER_START.length, endIdx).trim();
+  return inner || null;
 }
 
 // ---------------------------------------------------------------------------
