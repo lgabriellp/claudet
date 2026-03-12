@@ -134,13 +134,12 @@ export interface CreateFlags {
   branch: string;
   target?: string;
   ticket?: string;
-  draftPR: boolean;
   skipSetup: boolean;
   repo?: string;
 }
 
 export function parseCreateFlags(argv: string[]): CreateFlags {
-  const flags: CreateFlags = { branch: "", draftPR: false, skipSetup: false };
+  const flags: CreateFlags = { branch: "", skipSetup: false };
   let i = 0;
   while (i < argv.length) {
     const arg = argv[i];
@@ -155,9 +154,6 @@ export function parseCreateFlags(argv: string[]): CreateFlags {
         break;
       case "--ticket":
         flags.ticket = argv[++i] ?? "";
-        break;
-      case "--draft-pr":
-        flags.draftPR = true;
         break;
       case "--skip-setup":
         flags.skipSetup = true;

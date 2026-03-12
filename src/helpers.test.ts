@@ -308,7 +308,6 @@ describe("parseCreateFlags", () => {
       "main",
       "--ticket",
       "PROJ-123",
-      "--draft-pr",
       "--skip-setup",
       "--repo",
       "/path/to/repo",
@@ -317,7 +316,6 @@ describe("parseCreateFlags", () => {
       branch: "feat/x",
       target: "main",
       ticket: "PROJ-123",
-      draftPR: true,
       skipSetup: true,
       repo: "/path/to/repo",
     });
@@ -336,21 +334,13 @@ describe("parseCreateFlags", () => {
 
   it("defaults boolean flags to false", () => {
     const result = parseCreateFlags(["-b", "x"]);
-    expect(result.draftPR).toBe(false);
     expect(result.skipSetup).toBe(false);
   });
 
   it("handles mixed order", () => {
-    const result = parseCreateFlags([
-      "--draft-pr",
-      "-b",
-      "feat/z",
-      "--ticket",
-      "T-1",
-    ]);
+    const result = parseCreateFlags(["-b", "feat/z", "--ticket", "T-1"]);
     expect(result.branch).toBe("feat/z");
     expect(result.ticket).toBe("T-1");
-    expect(result.draftPR).toBe(true);
   });
 });
 

@@ -33,9 +33,8 @@ claudet clean        # Interactive: select worktrees to archive (with confirmati
 When creating via `claudet`:
 
 1. **Branch name** — e.g., `feat/new-feature`
-2. **Target branch** — Default: `dev`. Use `main` for high priority.
+2. **Target branch** — Default: `dev`. Use `main` for high priority. This is the base for branching and the PR target.
 3. **Ticket** — Optional issue tracker ID. Written to plan file.
-4. **Create draft PR?** — Optional. Runs `gh pr create --draft`.
 
 The script:
 
@@ -53,7 +52,7 @@ Every worktree gets `~/.claudet/repos/<slug>/plans/<name>.md` with these require
 - **Context** — Why this change is being made
 - **Objective** — What will be done
 - **Ticket** — Issue tracker link or ID (e.g., `ClickUp: ABC-123`, `Jira: PROJ-456`)
-- **Target Branch** — dev (default) or main
+- **Target Branch** — Base branch for the PR (e.g., `dev`, `main`)
 - **Key Files** — Files that will be created/modified
 - **Test Scenarios** — Test plan grouped by tier
 - **Status** — pending | in-progress | review | done

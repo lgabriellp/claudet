@@ -749,6 +749,7 @@ async function reconcileWorktrees(
   dataDir: string,
   slug: string,
   repoRoot: string,
+  defaultTarget: string,
 ): Promise<WorktreesData> {
   const data = loadWorktrees(dataDir, slug);
   const wtBaseDir = resolve(dataDir, "repos", slug, "worktrees");
@@ -774,8 +775,12 @@ async function reconcileWorktrees(
         // fall back to entry name
       }
 
-      data.worktrees[entry] = { branch, target: "dev", archivedAt: null };
-      createPlanFile(dataDir, slug, entry, { target: "dev", branch });
+      data.worktrees[entry] = {
+        branch,
+        target: defaultTarget,
+        archivedAt: null,
+      };
+      createPlanFile(dataDir, slug, entry, { target: defaultTarget, branch });
       changed = true;
     }
   }
@@ -814,8 +819,12 @@ async function reconcileWorktrees(
       if (data.worktrees[name] && !data.worktrees[name].archivedAt) continue;
 
       const branch = branchLine.replace("branch refs/heads/", "");
-      data.worktrees[name] = { branch, target: "dev", archivedAt: null };
-      createPlanFile(dataDir, slug, name, { target: "dev", branch });
+      data.worktrees[name] = {
+        branch,
+        target: defaultTarget,
+        archivedAt: null,
+      };
+      createPlanFile(dataDir, slug, name, { target: defaultTarget, branch });
       changed = true;
     }
   } catch (err) {
@@ -1045,51 +1054,6 @@ function worklogMigrate(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Draft PR creation
-// ---------------------------------------------------------------------------
-
-async function pushAndCreateDraftPR(
-  cwd: string,
-  branch: string,
-  target: string,
-): Promise<void> {
-  const s = p.spinner();
-  s.start("Pushing branch to origin...");
-  try {
-    await git(cwd).push("origin", branch, ["--set-upstream"]);
-    s.stop(`Pushed ${pc.cyan(branch)} to origin.`);
-  } catch (err: any) {
-    s.stop(pc.yellow(`Could not push branch: ${err.message || err}`));
-    return;
-  }
-
-  const info = await getRepoInfo(cwd);
-  const octokit = getOctokit();
-  if (!info || !octokit) {
-    p.log.warn(
-      "Could not resolve GitHub repo or token — skipping PR creation.",
-    );
-    return;
-  }
-
-  s.start("Creating draft PR...");
-  try {
-    const { data: pr } = await octokit.rest.pulls.create({
-      owner: info.owner,
-      repo: info.repo,
-      head: branch,
-      base: target,
-      title: branch,
-      body: "WIP",
-      draft: true,
-    });
-    s.stop(`Draft PR: ${pc.underline(pr.html_url)}`);
-  } catch (err: any) {
-    s.stop(pc.yellow(`Could not create draft PR: ${err.message || err}`));
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Hook auto-configuration
 // ---------------------------------------------------------------------------
 
@@ -1232,7 +1196,11 @@ function launchClaude(cwd: string, ctx?: SessionContext): void {
   }
   const args: string[] = [];
   if (ctx?.planPath) {
-    args.push("load plan");
+    if (ctx.status === "pending") {
+      args.push("load plan and start planning");
+    } else {
+      args.push("load plan");
+    }
   }
   const child = spawn("claude", args, {
     cwd,
@@ -1587,16 +1555,20 @@ async function interactiveFlow(): Promise<void> {
 
   const { slug, repoRoot } = await pickRepo(dataDir);
 
+  const projectConfig = loadProjectConfig(dataDir, slug);
+  const globalCfg = loadGlobalConfig();
+  const defaultTarget =
+    projectConfig.defaultTarget || globalCfg.defaultTarget || "dev";
+
   const s = p.spinner();
   s.start("Loading worktrees...");
-  const data = await reconcileWorktrees(dataDir, slug, repoRoot);
+  const data = await reconcileWorktrees(dataDir, slug, repoRoot, defaultTarget);
   const activeCount = Object.entries(data.worktrees).filter(
     ([name, entry]) => !entry.archivedAt && !isSmokeTestWorktree(name),
   ).length;
   s.stop(activeCount > 0 ? "Worktrees loaded." : "No active worktrees found.");
 
   const EPOCH = "1970-01-01T00:00:00.000Z";
-  const globalCfg = loadGlobalConfig();
   const highPriorityTarget = globalCfg.highPriorityTarget ?? "main";
 
   const activeEntries = Object.entries(data.worktrees)
@@ -1701,17 +1673,6 @@ async function interactiveFlow(): Promise<void> {
   }
   p.note(infoLines.join("\n"), selectedName);
 
-  // Offer to create a draft PR if none exists
-  if (!pr) {
-    const createPR = await p.confirm({
-      message: "No PR found. Create a draft PR?",
-      initialValue: false,
-    });
-    if (!cancelled(createPR) && createPR) {
-      await pushAndCreateDraftPR(selectedWtPath, entry.branch, entry.target);
-    }
-  }
-
   touchLastAccessed(dataDir, slug, selectedName);
   launchClaude(selectedWtPath, {
     planPath: pPath,
@@ -1768,7 +1729,7 @@ async function createNewWorktreeFlow(
               ]
             : localBranches;
         return p.select({
-          message: "Target branch",
+          message: "Target branch (base for branching & PRs)",
           options: sorted.map((b) => ({
             value: b,
             label: b,
@@ -1782,11 +1743,6 @@ async function createNewWorktreeFlow(
           message: "Issue tracker ticket",
           placeholder: "CU-abc123, JIRA-456, LIN-789 (optional)",
         }),
-      draftPR: () =>
-        p.confirm({
-          message: "Create draft PR?",
-          initialValue: false,
-        }),
     },
     {
       onCancel: () => bail("Cancelled."),
@@ -1796,7 +1752,6 @@ async function createNewWorktreeFlow(
   const branch = result.branch as string;
   const target = (result.target as string) || defaultTarget;
   const ticket = result.ticket as string;
-  const draftPR = result.draftPR as boolean;
   const shortName = deriveShortName(branch);
 
   const { wtPath, planPath } = await createWorktree(
@@ -1809,10 +1764,6 @@ async function createNewWorktreeFlow(
     false,
     ticket || undefined,
   );
-
-  if (draftPR) {
-    await pushAndCreateDraftPR(wtPath, branch, target);
-  }
 
   touchLastAccessed(dataDir, slug, shortName);
   launchClaude(wtPath, {
@@ -1879,30 +1830,6 @@ async function createCommand(): Promise<void> {
     flags.ticket,
     true,
   );
-
-  if (flags.draftPR) {
-    try {
-      const wt = wtDirPath(dataDir, slug, shortName);
-      await git(wt).push("origin", flags.branch, ["--set-upstream"]);
-      const info = await getRepoInfo(wt);
-      const octokit = getOctokit();
-      if (info && octokit) {
-        await octokit.rest.pulls.create({
-          owner: info.owner,
-          repo: info.repo,
-          head: flags.branch,
-          base: target,
-          title: flags.branch,
-          body: "WIP",
-          draft: true,
-        });
-      }
-    } catch (err) {
-      throw new Error(
-        `Worktree created successfully but draft PR failed: ${err instanceof Error ? err.message : err}`,
-      );
-    }
-  }
 
   console.log(
     JSON.stringify({
@@ -2260,7 +2187,7 @@ async function runInitSetup(): Promise<void> {
   if (cancelled(scanDirsInput)) bail("Cancelled.");
 
   const highPriorityTargetInput = await p.text({
-    message: "High priority target branch",
+    message: "High-priority target (sort first)",
     placeholder: "main",
     defaultValue: existing.highPriorityTarget || "main",
     initialValue: existing.highPriorityTarget || "",
@@ -2268,7 +2195,7 @@ async function runInitSetup(): Promise<void> {
   if (cancelled(highPriorityTargetInput)) bail("Cancelled.");
 
   const defaultTargetInput = await p.text({
-    message: "Normal priority target branch",
+    message: "Default target branch (base for branching & PRs)",
     placeholder: "dev",
     defaultValue: existing.defaultTarget || "dev",
     initialValue: existing.defaultTarget || "",
@@ -2419,7 +2346,6 @@ switch (subcommand) {
     --branch, -b <name>      Branch name (required)
     --target, -t <branch>    Base branch (default: project config defaultTarget or dev)
     --ticket <id>            Issue tracker ticket ID
-    --draft-pr               Push and create a GitHub draft PR
     --skip-setup             Skip setup commands
     --repo <path>            Main repo root (auto-detected from worktrees)
 `);

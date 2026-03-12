@@ -1,7 +1,7 @@
 ## Worktree Session
 
-**Plan file:** /Users/lgabriel/.claudet/repos/vibe--claudet/plans/worklog.md
-**Branch:** feature/worklog → main
+**Plan file:** /Users/lgabriel/.claudet/repos/vibe--claudet/plans/new-repo.md
+**Branch:** feature/new-repo → dev
 
 ### Session Protocol
 

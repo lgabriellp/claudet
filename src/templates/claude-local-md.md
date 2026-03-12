@@ -2,6 +2,7 @@
 
 **Plan file:** {{planPath}}
 **Branch:** {{branch}} → {{target}}
+**PR target:** {{target}} (use `--base {{target}}` when creating PRs)
 
 ### Session Protocol
 
