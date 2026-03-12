@@ -3,11 +3,11 @@
 See [claudet/worktree-workflow.md](./claudet/worktree-workflow.md) for full conventions.
 
 - Sessions are started via `claudet` which selects the worktree and launches Claude inside it
-- Read the worktree's plan file from `.claude/rules/session.md` at session start
+- Read the plan file path from `.claude/CLAUDE.local.md` at session start
 - Append to the plan's Progress section at the start and end of each session
 - If status is `pending`, start planning. If `in-progress`, continue from last progress entry.
 - ALL change requests must be logged in the plan's Progress section, even when outside plan mode
-- Plans are stored at `~/.claude/plans/<name>.md`
+- Plans are stored at `~/.claudet/repos/<slug>/plans/<name>.md`
 - Required fields: Context, Objective, Ticket, Target Branch, Key Files, Test Scenarios, Status, Progress
 
 ## Planning

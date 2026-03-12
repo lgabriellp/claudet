@@ -17,7 +17,7 @@ All worktrees live in a `worktrees/` directory, sibling to the main repo:
 
 - `<repoRoot>/.claude/worktrees.json` — Per-repo worktree metadata (scoped to that repo)
 - `~/.claude/repos.json` — Registry of known repo root paths (for repo discovery)
-- `~/.claude/plans/<name>.md` — Structured plan file per worktree
+- `~/.claudet/repos/<slug>/plans/<name>.md` — Structured plan file per worktree
 - Entries are never deleted from `worktrees.json`; archived entries have `archivedAt` set
 - On first run after migration, `~/.claude/worktrees.json` is split into per-repo files and renamed to `~/.claude/worktrees.json.migrated`
 
@@ -48,7 +48,7 @@ The script:
 
 ## Plan Files
 
-Every worktree gets `~/.claude/plans/<name>.md` with these required fields:
+Every worktree gets `~/.claudet/repos/<slug>/plans/<name>.md` with these required fields:
 
 - **Context** — Why this change is being made
 - **Objective** — What will be done
@@ -66,8 +66,8 @@ ALL change requests must be documented in the Progress section of the plan file 
 ## Session Lifecycle
 
 1. `claudet` selects the worktree and launches Claude
-2. `claudet` writes `.claude/rules/session.md` into the worktree with the plan path
-3. Claude reads the plan file path from `.claude/rules/session.md` (auto-loaded) at session start
+2. `claudet` writes `.claude/CLAUDE.local.md` into the worktree with the plan path, branch, and target
+3. Claude reads the plan file path from `.claude/CLAUDE.local.md` (auto-loaded) at session start
 4. Claude appends to Progress at the start and end of each session
 5. If status is `pending`, start planning. If `in-progress`, continue from last progress entry.
 

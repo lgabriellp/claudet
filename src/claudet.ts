@@ -1210,10 +1210,25 @@ function updatePlanSessionContext(ctx: SessionContext): void {
   writeFileSync(ctx.planPath, content);
 }
 
+function generateClaudeLocalMd(wtPath: string, ctx: SessionContext): void {
+  const claudeDir = resolve(wtPath, ".claude");
+  if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
+  const template = readFileSync(
+    resolve(TEMPLATES_DIR, "claude-local-md.md"),
+    "utf-8",
+  );
+  const content = template
+    .replace(/\{\{planPath\}\}/g, ctx.planPath)
+    .replace(/\{\{branch\}\}/g, ctx.branch)
+    .replace(/\{\{target\}\}/g, ctx.target);
+  writeFileSync(resolve(claudeDir, "CLAUDE.local.md"), content);
+}
+
 function launchClaude(cwd: string, ctx?: SessionContext): void {
   p.outro(pc.dim(`Launching claude in ${cwd}`));
   if (ctx) {
     updatePlanSessionContext(ctx);
+    generateClaudeLocalMd(cwd, ctx);
   }
   const args: string[] = [];
   if (ctx?.planPath) {
