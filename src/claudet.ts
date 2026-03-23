@@ -46,6 +46,10 @@ import {
   computeReviewDecision,
   prNeedsAttention,
   upsertPlanSection,
+  getTargetFromPlan,
+  getBranchFromPlan,
+  getPlanSection,
+  computeWorklogEvents,
   type CreateFlags,
   type HookDefinition,
   type HookMatcherGroup,
@@ -232,6 +236,10 @@ interface SessionState {
   startTime: number;
   lastTick: number;
   progressCount: number;
+  branch: string;
+  target: string;
+  context: string | null;
+  objective: string | null;
 }
 
 interface PRStatus {
@@ -494,12 +502,6 @@ pending
 - ${date} ${time}: Created worktree, started planning
 `;
     writeFileSync(pPath, content);
-
-    appendWorklog(dataDir, {
-      event: "plan_created",
-      timestamp: Date.now(),
-      plan: name,
-    });
   }
 
   return pPath;
@@ -878,7 +880,13 @@ async function worklogStart(): Promise<void> {
   if (!existsSync(pPath)) return;
 
   const now = Date.now();
-  const progressEntries = getProgressEntries(pPath);
+  const planContent = readFileSync(pPath, "utf-8");
+  const progressEntries = getProgressEntriesContent(planContent);
+  const branch = wtMatch.branch || "unknown";
+  const target = getTargetFromPlan(planContent);
+  const context = getPlanSection(planContent, "Context");
+  const objective = getPlanSection(planContent, "Objective");
+
   const state: SessionState = {
     slug: wtMatch.slug,
     plan: wtMatch.name,
@@ -886,16 +894,12 @@ async function worklogStart(): Promise<void> {
     startTime: now,
     lastTick: now,
     progressCount: progressEntries.length,
+    branch,
+    target,
+    context,
+    objective,
   };
   writeFileSync(sessionStatePath(sessionId), JSON.stringify(state));
-
-  const planStatus = getStatusFromPlan(pPath);
-  appendWorklog(dataDir, {
-    event: "session_start",
-    timestamp: now,
-    plan: wtMatch.name,
-    planStatus,
-  });
 }
 
 async function worklogTick(): Promise<void> {
@@ -914,6 +918,12 @@ async function worklogTick(): Promise<void> {
   );
   if (!state) return;
 
+  // Normalize fields that may be absent in old session state files
+  state.branch = state.branch ?? "unknown";
+  state.target = state.target ?? "unknown";
+  state.context = state.context ?? null;
+  state.objective = state.objective ?? null;
+
   const dataDir = resolveDataDir();
   const now = Date.now();
   const elapsedSinceLastTick = now - state.lastTick;
@@ -923,48 +933,50 @@ async function worklogTick(): Promise<void> {
     updatePlanTimeTracked(state.planPath, elapsedSinceLastTick);
   }
 
-  // Promote pending → in-progress
+  // Read plan content once for all checks
+  let content = "";
   if (state.planPath && existsSync(state.planPath)) {
-    const content = readFileSync(state.planPath, "utf-8");
-    const statusMatch = content.match(/^## Status\s*\n([^\n#]+)/m);
-    if (statusMatch && statusMatch[1].trim() === "pending") {
-      const updated = content.replace(
-        /^(## Status\s*\n)pending/m,
-        "$1in-progress",
-      );
-      writeFileSync(state.planPath, updated);
-    }
+    content = readFileSync(state.planPath, "utf-8");
   }
 
-  // Log new progress entries
-  const progressEntries = getProgressEntries(state.planPath);
-  const prevCount = state.progressCount ?? 0;
-  if (progressEntries.length > prevCount) {
-    const newEntries = progressEntries.slice(prevCount);
-    for (const entry of newEntries) {
-      appendWorklog(dataDir, {
-        event: "progress",
-        timestamp: now,
-        datetime: new Date(now).toISOString(),
-        plan: state.plan,
-        message: entry,
-      });
-    }
+  // Delegate decision logic to pure function
+  const result = computeWorklogEvents(
+    {
+      slug: state.slug,
+      plan: state.plan,
+      branch: state.branch,
+      target: state.target,
+      context: state.context,
+      objective: state.objective,
+      progressCount: state.progressCount ?? 0,
+    },
+    content,
+    now,
+  );
+
+  // Apply I/O side effects: write updated plan file if pending→in-progress
+  if (result.updatedPlanContent !== null && state.planPath) {
+    writeFileSync(state.planPath, result.updatedPlanContent);
   }
 
-  const planStatus = getStatusFromPlan(state.planPath);
-  const elapsedMs = now - state.startTime;
-  appendWorklog(dataDir, {
-    event: "tick",
-    timestamp: now,
-    plan: state.plan,
-    elapsedMs,
-    planStatus,
-  });
+  // Append all events to worklog
+  for (const event of result.events) {
+    appendWorklog(dataDir, event);
+  }
 
-  // Update lastTick + progressCount in state
+  // Apply state updates
+  if (result.stateUpdates.context !== undefined) {
+    state.context = result.stateUpdates.context;
+  }
+  if (result.stateUpdates.objective !== undefined) {
+    state.objective = result.stateUpdates.objective;
+  }
+  if (result.stateUpdates.progressCount !== undefined) {
+    state.progressCount = result.stateUpdates.progressCount;
+  }
+
+  // Update lastTick in state
   state.lastTick = now;
-  state.progressCount = progressEntries.length;
   writeFileSync(statePath, JSON.stringify(state));
 }
 
@@ -991,8 +1003,11 @@ function worklogMigrate(): void {
     for (const file of planFiles) {
       const planName = file.replace(/\.md$/, "");
       const pPath = resolve(plansDir, file);
-      const entries = getProgressEntries(pPath);
+      const planContent = readFileSync(pPath, "utf-8");
+      const entries = getProgressEntriesContent(planContent);
       if (entries.length === 0) continue;
+      const branch = getBranchFromPlan(planContent);
+      const target = getTargetFromPlan(planContent);
 
       // Check what's already in the worklog for this plan
       const wlPath = worklogPath(dataDir);
@@ -1033,6 +1048,8 @@ function worklogMigrate(): void {
           datetime: ts ? new Date(ts).toISOString() : null,
           plan: planName,
           slug,
+          branch,
+          target,
           message: entry,
           migrated: true,
         });

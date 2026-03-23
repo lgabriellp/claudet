@@ -37,6 +37,10 @@ import {
   computeReviewDecision,
   prNeedsAttention,
   upsertPlanSection,
+  getTargetFromPlan,
+  getBranchFromPlan,
+  getPlanSection,
+  computeWorklogEvents,
   type WorktreeSortEntry,
   type ReviewInfo,
 } from "./helpers.js";
@@ -1446,5 +1450,276 @@ describe("upsertPlanSection", () => {
       "Target Branch",
     );
     expect(twice).toBe(once);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getTargetFromPlan
+// ---------------------------------------------------------------------------
+
+describe("getTargetFromPlan", () => {
+  it("extracts target branch value", () => {
+    const content = "## Target Branch\nmain\n\n## Status\npending\n";
+    expect(getTargetFromPlan(content)).toBe("main");
+  });
+
+  it("returns 'unknown' when section missing", () => {
+    expect(getTargetFromPlan("## Status\npending\n")).toBe("unknown");
+  });
+
+  it("trims whitespace", () => {
+    const content = "## Target Branch\n  dev  \n\n## Status\npending\n";
+    expect(getTargetFromPlan(content)).toBe("dev");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getBranchFromPlan
+// ---------------------------------------------------------------------------
+
+describe("getBranchFromPlan", () => {
+  it("extracts branch value", () => {
+    const content = "## Branch\nfeature/foo\n\n## Status\npending\n";
+    expect(getBranchFromPlan(content)).toBe("feature/foo");
+  });
+
+  it("returns 'unknown' when section missing", () => {
+    expect(getBranchFromPlan("## Status\npending\n")).toBe("unknown");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getPlanSection
+// ---------------------------------------------------------------------------
+
+describe("getPlanSection", () => {
+  it("extracts section content", () => {
+    const content =
+      "## Context\nThis is why we do it.\n\n## Objective\nBuild the thing.\n";
+    expect(getPlanSection(content, "Context")).toBe("This is why we do it.");
+    expect(getPlanSection(content, "Objective")).toBe("Build the thing.");
+  });
+
+  it("returns null when section missing", () => {
+    expect(getPlanSection("## Status\npending\n", "Context")).toBe(null);
+  });
+
+  it("strips comment placeholders", () => {
+    const content =
+      "## Context\n<!-- Why this change is being made -->\n\n## Status\npending\n";
+    expect(getPlanSection(content, "Context")).toBe(null);
+  });
+
+  it("strips comments but keeps real content", () => {
+    const content =
+      "## Context\n<!-- placeholder -->\nActual context here.\n\n## Status\npending\n";
+    expect(getPlanSection(content, "Context")).toBe("Actual context here.");
+  });
+
+  it("handles multiline section content", () => {
+    const content =
+      "## Context\nLine one.\nLine two.\n\n## Objective\nDo stuff.\n";
+    expect(getPlanSection(content, "Context")).toBe("Line one.\nLine two.");
+  });
+
+  it("finds heading at the very start of the file", () => {
+    const content = "## Context\nFirst section content\n\n## Other\nStuff\n";
+    expect(getPlanSection(content, "Context")).toBe("First section content");
+  });
+
+  it("extracts last section at EOF without trailing newline", () => {
+    const content = "## Stuff\nBefore\n\n## Context\nAt the end";
+    expect(getPlanSection(content, "Context")).toBe("At the end");
+  });
+
+  it("returns null for whitespace-only body", () => {
+    const content = "## Context\n   \n\n## Other\nStuff\n";
+    expect(getPlanSection(content, "Context")).toBe(null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// computeWorklogEvents
+// ---------------------------------------------------------------------------
+
+describe("computeWorklogEvents", () => {
+  const baseState = {
+    slug: "org--repo",
+    plan: "my-plan",
+    branch: "feature/test",
+    target: "dev",
+    context: null as string | null,
+    objective: null as string | null,
+    progressCount: 0,
+  };
+
+  const now = 1700000000000;
+
+  function makePlan(opts: {
+    status?: string;
+    context?: string;
+    objective?: string;
+    progress?: string[];
+  }): string {
+    const lines = [
+      "# my-plan",
+      "",
+      "## Context",
+      opts.context ?? "<!-- placeholder -->",
+      "",
+      "## Objective",
+      opts.objective ?? "<!-- placeholder -->",
+      "",
+      "## Status",
+      opts.status ?? "in-progress",
+      "",
+      "## Progress",
+      "<!-- log -->",
+    ];
+    if (opts.progress) {
+      for (const p of opts.progress) lines.push(`- ${p}`);
+    }
+    lines.push("");
+    return lines.join("\n");
+  }
+
+  it("promotes pending → in-progress, emits plan_accepted", () => {
+    const plan = makePlan({
+      status: "pending",
+      context: "Why",
+      objective: "What",
+    });
+    const result = computeWorklogEvents(baseState, plan, now);
+
+    expect(result.events).toHaveLength(1);
+    expect(result.events[0].event).toBe("plan_accepted");
+    expect(result.events[0].context).toBe("Why");
+    expect(result.events[0].objective).toBe("What");
+    expect(result.updatedPlanContent).not.toBeNull();
+    expect(result.updatedPlanContent).toContain("in-progress");
+    expect(result.stateUpdates.context).toBe("Why");
+    expect(result.stateUpdates.objective).toBe("What");
+  });
+
+  it("does not promote already in-progress", () => {
+    const plan = makePlan({
+      status: "in-progress",
+      context: "Why",
+      objective: "What",
+    });
+    const state = { ...baseState, context: "Why", objective: "What" };
+    const result = computeWorklogEvents(state, plan, now);
+
+    expect(result.events).toHaveLength(0);
+    expect(result.updatedPlanContent).toBeNull();
+  });
+
+  it("detects context change → emits plan_updated", () => {
+    const plan = makePlan({ context: "New context", objective: "Same" });
+    const state = { ...baseState, context: "Old context", objective: "Same" };
+    const result = computeWorklogEvents(state, plan, now);
+
+    const updateEvents = result.events.filter(
+      (e) => e.event === "plan_updated",
+    );
+    expect(updateEvents).toHaveLength(1);
+    expect(updateEvents[0].context).toBe("New context");
+  });
+
+  it("detects objective change → emits plan_updated", () => {
+    const plan = makePlan({ context: "Same", objective: "New objective" });
+    const state = { ...baseState, context: "Same", objective: "Old objective" };
+    const result = computeWorklogEvents(state, plan, now);
+
+    const updateEvents = result.events.filter(
+      (e) => e.event === "plan_updated",
+    );
+    expect(updateEvents).toHaveLength(1);
+    expect(updateEvents[0].objective).toBe("New objective");
+  });
+
+  it("no plan_updated when nothing changed", () => {
+    const plan = makePlan({ context: "Same", objective: "Same" });
+    const state = { ...baseState, context: "Same", objective: "Same" };
+    const result = computeWorklogEvents(state, plan, now);
+
+    expect(
+      result.events.filter((e) => e.event === "plan_updated"),
+    ).toHaveLength(0);
+  });
+
+  it("skips plan_updated when plan_accepted just fired", () => {
+    const plan = makePlan({
+      status: "pending",
+      context: "New",
+      objective: "New",
+    });
+    const state = { ...baseState, context: "Old", objective: "Old" };
+    const result = computeWorklogEvents(state, plan, now);
+
+    expect(
+      result.events.filter((e) => e.event === "plan_accepted"),
+    ).toHaveLength(1);
+    expect(
+      result.events.filter((e) => e.event === "plan_updated"),
+    ).toHaveLength(0);
+  });
+
+  it("detects new progress entries → emits progress events", () => {
+    const plan = makePlan({
+      progress: [
+        "2026-03-01: Started",
+        "2026-03-02: Continued",
+        "2026-03-03: Almost done",
+      ],
+    });
+    const state = {
+      ...baseState,
+      context: null,
+      objective: null,
+      progressCount: 1,
+    };
+    const result = computeWorklogEvents(state, plan, now);
+
+    const progressEvents = result.events.filter((e) => e.event === "progress");
+    expect(progressEvents).toHaveLength(2);
+    expect(progressEvents[0].message).toBe("2026-03-02: Continued");
+    expect(progressEvents[1].message).toBe("2026-03-03: Almost done");
+  });
+
+  it("no progress events when count matches", () => {
+    const plan = makePlan({
+      progress: ["2026-03-01: Started"],
+    });
+    const state = {
+      ...baseState,
+      context: null,
+      objective: null,
+      progressCount: 1,
+    };
+    const result = computeWorklogEvents(state, plan, now);
+
+    expect(result.events.filter((e) => e.event === "progress")).toHaveLength(0);
+  });
+
+  it("progressCount never decreases (Math.max)", () => {
+    const plan = makePlan({}); // no progress entries
+    const state = {
+      ...baseState,
+      context: null,
+      objective: null,
+      progressCount: 5,
+    };
+    const result = computeWorklogEvents(state, plan, now);
+
+    expect(result.stateUpdates.progressCount).toBe(5);
+  });
+
+  it("empty plan content → no events", () => {
+    const result = computeWorklogEvents(baseState, "", now);
+
+    expect(result.events).toHaveLength(0);
+    expect(result.updatedPlanContent).toBeNull();
+    expect(result.stateUpdates).toEqual({});
   });
 });

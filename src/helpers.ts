@@ -293,6 +293,38 @@ export function getStatusFromPlan(content: string): string {
   return match ? match[1].trim() : "unknown";
 }
 
+export function getTargetFromPlan(content: string): string {
+  const match = content.match(/^## Target Branch\s*\n([^\n#]+)/m);
+  return match ? match[1].trim() : "unknown";
+}
+
+export function getBranchFromPlan(content: string): string {
+  const match = content.match(/^## Branch\s*\n([^\n#]+)/m);
+  return match ? match[1].trim() : "unknown";
+}
+
+export function getPlanSection(
+  content: string,
+  heading: string,
+): string | null {
+  const marker = `## ${heading}`;
+  const idx = content.indexOf(`\n${marker}\n`);
+  const start =
+    idx === -1 ? (content.startsWith(`${marker}\n`) ? 0 : -1) : idx + 1;
+  if (start === -1) return null;
+  const bodyStart = content.indexOf("\n", start) + 1;
+  const nextHeading = content.indexOf("\n## ", bodyStart);
+  const body =
+    nextHeading === -1
+      ? content.slice(bodyStart)
+      : content.slice(bodyStart, nextHeading);
+  const text = body
+    .trim()
+    .replace(/^<!--.*?-->\s*/gm, "")
+    .trim();
+  return text || null;
+}
+
 // ---------------------------------------------------------------------------
 // Date comparator
 // ---------------------------------------------------------------------------
@@ -330,6 +362,123 @@ export function compareWorktreeEntries(
     return compareDatesDesc(a.lastAccessedAt, b.lastAccessedAt);
   };
 }
+
+// ---------------------------------------------------------------------------
+// computeWorklogEvents — pure decision logic extracted from worklogTick
+// ---------------------------------------------------------------------------
+
+export interface WorklogEvent {
+  event: string;
+  [key: string]: unknown;
+}
+
+export interface WorklogTickResult {
+  events: WorklogEvent[];
+  stateUpdates: {
+    context?: string | null;
+    objective?: string | null;
+    progressCount?: number;
+  };
+  updatedPlanContent: string | null; // non-null only if pending→in-progress
+}
+
+export function computeWorklogEvents(
+  state: {
+    slug: string;
+    plan: string;
+    branch: string;
+    target: string;
+    context: string | null;
+    objective: string | null;
+    progressCount: number;
+  },
+  planContent: string,
+  now: number,
+): WorklogTickResult {
+  const events: WorklogEvent[] = [];
+  const stateUpdates: WorklogTickResult["stateUpdates"] = {};
+  let updatedPlanContent: string | null = null;
+
+  if (!planContent) {
+    return { events, stateUpdates, updatedPlanContent };
+  }
+
+  let content = planContent;
+
+  // 1. Promote pending → in-progress → emit plan_accepted
+  let planAccepted = false;
+  const statusMatch = content.match(/^## Status\s*\n([^\n#]+)/m);
+  if (statusMatch && statusMatch[1].trim() === "pending") {
+    content = content.replace(/^(## Status\s*\n)pending/m, "$1in-progress");
+    updatedPlanContent = content;
+
+    const curCtx = getPlanSection(content, "Context");
+    const curObj = getPlanSection(content, "Objective");
+    events.push({
+      event: "plan_accepted",
+      timestamp: now,
+      datetime: new Date(now).toISOString(),
+      plan: state.plan,
+      slug: state.slug,
+      branch: state.branch,
+      target: state.target,
+      context: curCtx,
+      objective: curObj,
+    });
+    stateUpdates.context = curCtx;
+    stateUpdates.objective = curObj;
+    planAccepted = true;
+  }
+
+  // 2. Detect context/objective changes (skip if plan_accepted) → emit plan_updated
+  if (!planAccepted) {
+    const curCtx = getPlanSection(content, "Context");
+    const curObj = getPlanSection(content, "Objective");
+    if (curCtx !== state.context || curObj !== state.objective) {
+      events.push({
+        event: "plan_updated",
+        timestamp: now,
+        datetime: new Date(now).toISOString(),
+        plan: state.plan,
+        slug: state.slug,
+        branch: state.branch,
+        target: state.target,
+        context: curCtx,
+        objective: curObj,
+      });
+      stateUpdates.context = curCtx;
+      stateUpdates.objective = curObj;
+    }
+  }
+
+  // 3. Detect new progress entries → emit progress events
+  const progressEntries = getProgressEntries(content);
+  const prevCount = state.progressCount ?? 0;
+  if (progressEntries.length > prevCount) {
+    const newEntries = progressEntries.slice(prevCount);
+    for (const entry of newEntries) {
+      events.push({
+        event: "progress",
+        timestamp: now,
+        datetime: new Date(now).toISOString(),
+        plan: state.plan,
+        slug: state.slug,
+        branch: state.branch,
+        target: state.target,
+        message: entry,
+      });
+    }
+  }
+
+  // 4. Math.max for progressCount
+  stateUpdates.progressCount = Math.max(prevCount, progressEntries.length);
+
+  return { events, stateUpdates, updatedPlanContent };
+}
+
+// ---------------------------------------------------------------------------
+// Progress entry helpers
+// ---------------------------------------------------------------------------
 
 export function getProgressEntries(content: string): string[] {
   const progressSection = content.split("## Progress")[1];

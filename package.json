@@ -2,6 +2,8 @@
   "name": "claudet",
   "version": "2.1.4",
   "description": "Interactive worktree manager + Claude launcher",
+  "license": "MIT",
+  "private": true,
   "type": "module",
   "bin": {
     "claudet": "./bin/claudet"
@@ -10,8 +12,11 @@
     "setup": "bash scripts/install.sh",
     "dev": "tsx src/claudet.ts",
     "typecheck": "tsgo --noEmit",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "test": "vitest run --exclude 'src/evals/**'",
+    "test:evals": "vitest run src/evals/",
+    "test:evals:flaky": "tsx src/evals/flakiness.ts",
+    "test:all": "vitest run",
+    "test:watch": "vitest --exclude 'src/evals/**'",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },
