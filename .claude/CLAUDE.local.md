@@ -2,6 +2,7 @@
 
 **Plan file:** /Users/lgabriel/.claudet/repos/vibe--claudet/plans/new-repo.md
 **Branch:** feature/new-repo → dev
+**PR target:** dev (use `--base dev` when creating PRs)
 
 ### Session Protocol
 

@@ -246,9 +246,24 @@ export function deriveRepoSlug(repoRoot: string): string {
 // Git helpers
 // ---------------------------------------------------------------------------
 
+export const TRACKER_PREFIXES = [
+  "jira",
+  "clickup",
+  "linear",
+  "github",
+] as const;
+export type TrackerPrefix = (typeof TRACKER_PREFIXES)[number];
+
+export function composeBranchFromTask(
+  tracker: TrackerPrefix,
+  taskId: string,
+): string {
+  return `${tracker}/${taskId}`;
+}
+
 export function deriveShortName(branch: string): string {
   return branch
-    .replace(/^(feat|fix|chore|feature|test)\//, "")
+    .replace(/^(feat|fix|chore|feature|test|jira|clickup|linear|github)\//, "")
     .replace(/\//g, "-");
 }
 

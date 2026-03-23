@@ -19,6 +19,7 @@ import {
   toMergeableStatus,
   deriveRepoSlug,
   deriveShortName,
+  composeBranchFromTask,
   isSmokeTestWorktree,
   parseCreateFlags,
   formatDuration,
@@ -274,6 +275,44 @@ describe("deriveShortName", () => {
 
   it("converts nested slashes to dashes", () => {
     expect(deriveShortName("feat/scope/detail")).toBe("scope-detail");
+  });
+
+  it("strips jira/ prefix", () => {
+    expect(deriveShortName("jira/PROJ-123")).toBe("PROJ-123");
+  });
+
+  it("strips clickup/ prefix", () => {
+    expect(deriveShortName("clickup/CU-abc")).toBe("CU-abc");
+  });
+
+  it("strips linear/ prefix", () => {
+    expect(deriveShortName("linear/LIN-42")).toBe("LIN-42");
+  });
+
+  it("strips github/ prefix", () => {
+    expect(deriveShortName("github/42")).toBe("42");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// composeBranchFromTask
+// ---------------------------------------------------------------------------
+
+describe("composeBranchFromTask", () => {
+  it("composes jira branch", () => {
+    expect(composeBranchFromTask("jira", "PROJ-123")).toBe("jira/PROJ-123");
+  });
+
+  it("composes clickup branch", () => {
+    expect(composeBranchFromTask("clickup", "CU-abc")).toBe("clickup/CU-abc");
+  });
+
+  it("composes linear branch", () => {
+    expect(composeBranchFromTask("linear", "LIN-42")).toBe("linear/LIN-42");
+  });
+
+  it("composes github branch", () => {
+    expect(composeBranchFromTask("github", "42")).toBe("github/42");
   });
 });
 

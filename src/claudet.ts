@@ -26,6 +26,9 @@ import {
   toMergeableStatus,
   deriveRepoSlug,
   deriveShortName,
+  composeBranchFromTask,
+  TRACKER_PREFIXES,
+  type TrackerPrefix,
   isSmokeTestWorktree,
   parseCreateFlags,
   formatDuration,
@@ -1728,47 +1731,90 @@ async function createNewWorktreeFlow(
   }
   const localBranches = branchSummary.all;
 
-  const result = await p.group(
-    {
-      branch: () =>
-        p.text({
-          message: "Branch name",
-          placeholder: "feat/new-feature",
-          validate: validateBranchName,
-        }),
-      target: () => {
-        const defaultIdx = localBranches.indexOf(defaultTarget);
-        const sorted =
-          defaultIdx >= 0
-            ? [
-                defaultTarget,
-                ...localBranches.filter((b) => b !== defaultTarget),
-              ]
-            : localBranches;
-        return p.select({
-          message: "Target branch (base for branching & PRs)",
-          options: sorted.map((b) => ({
-            value: b,
-            label: b,
-            hint: b === branchSummary.current ? "current" : undefined,
-          })),
-          maxItems: sorted.length,
-        });
+  // Step 1 — choose naming method
+  const method = await p.select({
+    message: "How do you want to name the branch?",
+    options: [
+      {
+        value: "name" as const,
+        label: "By name",
+        hint: "enter branch name directly",
       },
-      ticket: () =>
-        p.text({
-          message: "Issue tracker ticket",
-          placeholder: "CU-abc123, JIRA-456, LIN-789 (optional)",
-        }),
-    },
-    {
-      onCancel: () => bail("Cancelled."),
-    },
-  );
+      {
+        value: "task" as const,
+        label: "By task",
+        hint: "derive from issue tracker task",
+      },
+    ],
+  });
+  if (cancelled(method)) bail("Cancelled.");
 
-  const branch = result.branch as string;
-  const target = (result.target as string) || defaultTarget;
-  const ticket = result.ticket as string;
+  let branch: string;
+  let ticket: string | undefined;
+
+  if (method === "task") {
+    // Step 2b — "By task" path
+    const tracker = await p.select({
+      message: "Issue tracker",
+      options: TRACKER_PREFIXES.map((t) => ({ value: t, label: t })),
+    });
+    if (cancelled(tracker)) bail("Cancelled.");
+
+    const taskId = await p.text({
+      message: "Task ID",
+      placeholder: "PROJ-123",
+      validate: (v) => (!v ? "Task ID is required" : undefined),
+    });
+    if (cancelled(taskId)) bail("Cancelled.");
+
+    const branchInput = await p.text({
+      message: "Branch name",
+      initialValue: composeBranchFromTask(
+        tracker as TrackerPrefix,
+        taskId as string,
+      ),
+      validate: validateBranchName,
+    });
+    if (cancelled(branchInput)) bail("Cancelled.");
+
+    branch = branchInput as string;
+    ticket = taskId as string;
+  } else {
+    // Step 2a — "By name" path
+    const branchInput = await p.text({
+      message: "Branch name",
+      placeholder: "feat/new-feature",
+      validate: validateBranchName,
+    });
+    if (cancelled(branchInput)) bail("Cancelled.");
+
+    const ticketInput = await p.text({
+      message: "Issue tracker ticket",
+      placeholder: "CU-abc123, JIRA-456, LIN-789 (optional)",
+    });
+    if (cancelled(ticketInput)) bail("Cancelled.");
+
+    branch = branchInput as string;
+    ticket = (ticketInput as string) || undefined;
+  }
+
+  // Step 3 — Target branch
+  const defaultIdx = localBranches.indexOf(defaultTarget);
+  const sorted =
+    defaultIdx >= 0
+      ? [defaultTarget, ...localBranches.filter((b) => b !== defaultTarget)]
+      : localBranches;
+  const target = await p.select({
+    message: "Target branch (base for branching & PRs)",
+    options: sorted.map((b) => ({
+      value: b,
+      label: b,
+      hint: b === branchSummary.current ? "current" : undefined,
+    })),
+    maxItems: sorted.length,
+  });
+  if (cancelled(target)) bail("Cancelled.");
+  const targetBranch = (target as string) || defaultTarget;
   const shortName = deriveShortName(branch);
 
   const { wtPath, planPath } = await createWorktree(
@@ -1776,17 +1822,17 @@ async function createNewWorktreeFlow(
     slug,
     repoRoot,
     branch,
-    target,
+    targetBranch,
     shortName,
     false,
-    ticket || undefined,
+    ticket,
   );
 
   touchLastAccessed(dataDir, slug, shortName);
   launchClaude(wtPath, {
     planPath,
     branch,
-    target,
+    target: targetBranch,
     status: "pending",
     lastProgress: null,
     pr: null,
