@@ -7,7 +7,6 @@ Claudet gives each Claude Code session its own git worktree and plan file, so yo
 ## Prerequisites
 
 - **Node.js 22+**
-- **pnpm**
 - **Claude Code CLI** (`claude`) installed and authenticated
 - **Git**
 - macOS or Linux (bash required)
@@ -17,24 +16,29 @@ Claudet gives each Claude Code session its own git worktree and plan file, so yo
 ```bash
 git clone https://github.com/lgabriellp/claudet.git
 cd claudet
-pnpm install
-pnpm install -g .
+npm install
+npm run build
+npm install -g .
 claudet install
 ```
 
-1. `pnpm install` — install dependencies
-2. `pnpm install -g .` — link the `claudet` binary globally so it's available on your PATH
-3. `claudet install` — configure the Claude Code statusline, remove legacy files, and verify the installation
+1. `npm install` — install dependencies
+2. `npm run build` — bundle into `dist/`
+3. `npm install -g .` — link the `claudet` binary globally so it's available on your PATH
+4. `claudet install` — configure the Claude Code statusline, remove legacy files, and verify the installation
 
-Alternatively, run `pnpm run setup` which executes all three steps.
+Alternatively, run `npm run setup` which executes all steps.
+
+Any package manager works (npm, pnpm, yarn, bun).
 
 ### Updating
 
 After pulling new changes:
 
 ```bash
-pnpm install
-pnpm install -g .
+npm install
+npm run build
+npm install -g .
 ```
 
 ## Usage

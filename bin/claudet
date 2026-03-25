@@ -2,4 +2,4 @@
 # Resolve the real path of this script (follows symlinks)
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-exec "$PROJECT_DIR/node_modules/.bin/tsx" "$PROJECT_DIR/src/claudet.ts" "$@"
+exec node "$PROJECT_DIR/dist/claudet.cjs" "$@"
