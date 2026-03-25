@@ -15,7 +15,7 @@ Claudet gives each Claude Code session its own git worktree and plan file, so yo
 ## Install
 
 ```bash
-git clone https://github.com/lgabriel/claudet.git
+git clone https://github.com/lgabriellp/claudet.git
 cd claudet
 pnpm install
 pnpm install -g .
