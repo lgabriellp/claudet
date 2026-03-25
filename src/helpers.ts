@@ -170,6 +170,22 @@ export function parseCreateFlags(argv: string[]): CreateFlags {
 }
 
 // ---------------------------------------------------------------------------
+// `claudet clean` flag parsing
+// ---------------------------------------------------------------------------
+
+export interface CleanFlags {
+  merged: boolean;
+}
+
+export function parseCleanFlags(argv: string[]): CleanFlags {
+  const flags: CleanFlags = { merged: false };
+  for (const arg of argv) {
+    if (arg === "--merged") flags.merged = true;
+  }
+  return flags;
+}
+
+// ---------------------------------------------------------------------------
 // Status helpers
 // ---------------------------------------------------------------------------
 

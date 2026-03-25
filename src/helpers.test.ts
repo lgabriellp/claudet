@@ -22,6 +22,7 @@ import {
   composeBranchFromTask,
   isSmokeTestWorktree,
   parseCreateFlags,
+  parseCleanFlags,
   formatDuration,
   parseDuration,
   compareDatesDesc,
@@ -384,6 +385,27 @@ describe("parseCreateFlags", () => {
     const result = parseCreateFlags(["-b", "feat/z", "--ticket", "T-1"]);
     expect(result.branch).toBe("feat/z");
     expect(result.ticket).toBe("T-1");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseCleanFlags
+// ---------------------------------------------------------------------------
+
+describe("parseCleanFlags", () => {
+  it("defaults merged to false", () => {
+    const result = parseCleanFlags([]);
+    expect(result).toEqual({ merged: false });
+  });
+
+  it("parses --merged flag", () => {
+    const result = parseCleanFlags(["--merged"]);
+    expect(result).toEqual({ merged: true });
+  });
+
+  it("ignores unknown flags", () => {
+    const result = parseCleanFlags(["--foo", "--merged"]);
+    expect(result).toEqual({ merged: true });
   });
 });
 

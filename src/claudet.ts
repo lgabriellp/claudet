@@ -53,6 +53,8 @@ import {
   getBranchFromPlan,
   getPlanSection,
   computeWorklogEvents,
+  parseCleanFlags,
+  type CleanFlags,
   type CreateFlags,
   type HookDefinition,
   type HookMatcherGroup,
@@ -115,6 +117,7 @@ function tryReadFileSync(filePath: string, fallback = ""): string {
 interface ProjectConfig {
   defaultTarget?: string;
   setup?: string[];
+  protectedBranches?: string[];
 }
 
 interface GlobalConfig {
@@ -260,6 +263,7 @@ interface SessionContext {
   status: string;
   lastProgress: string | null;
   pr: PRStatus | null;
+  behindRemote?: number;
 }
 
 interface RepoInfo {
@@ -437,23 +441,30 @@ function reviewSuffix(pr: PRStatus): string {
   }
 }
 
-function prBadge(pr: PRStatus | null, showConflict = true): string {
+function prStateLabel(pr: PRStatus): string {
+  if (pr.state === "OPEN" && pr.mergeable === "CONFLICTING") return "conflicts";
+  if (pr.state === "OPEN") return "open";
+  if (pr.state === "MERGED") return "merged";
+  return "closed";
+}
+
+function prBadge(pr: PRStatus | null): string {
   if (!pr) return pc.dim("no PR");
-  const conflict =
-    showConflict && pr.mergeable === "CONFLICTING"
-      ? `  ${pc.red("⚠ conflicts")}`
-      : "";
+  const label = prStateLabel(pr);
   const review = pr.state === "OPEN" ? reviewSuffix(pr) : "";
   const reviewPart = review ? `  ${review}` : "";
-  switch (pr.state) {
-    case "OPEN":
-      return pc.green(`PR #${pr.number} open`) + conflict + reviewPart;
-    case "MERGED":
-      return pc.magenta(`PR #${pr.number} merged`);
-    case "CLOSED":
-      return pc.red(`PR #${pr.number} closed`);
+  const text = `PR #${pr.number} ${label}`;
+  switch (label) {
+    case "conflicts":
+      return pc.red(text) + reviewPart;
+    case "open":
+      return pc.green(text) + reviewPart;
+    case "merged":
+      return pc.magenta(text);
+    case "closed":
+      return pc.red(text);
     default:
-      return pc.dim(`PR #${pr.number}`);
+      return pc.dim(text);
   }
 }
 
@@ -526,6 +537,46 @@ function getLastProgress(pPath: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// Plan status sync (PR state → plan status)
+// ---------------------------------------------------------------------------
+
+function syncPlanStatuses(
+  entries: [string, WorktreeEntry][],
+  prStatuses: Map<string, PRStatus | null>,
+  dataDir: string,
+  slug: string,
+): number {
+  let updated = 0;
+  for (const [name] of entries) {
+    const pr = prStatuses.get(name);
+    if (!pr) continue;
+
+    const pPath = planFilePath(dataDir, slug, name);
+    if (!existsSync(pPath)) continue;
+
+    const content = readFileSync(pPath, "utf-8");
+    const status = getStatusFromPlanContent(content);
+
+    let newStatus: string | null = null;
+    if (status === "in-progress" && pr.state === "OPEN") {
+      newStatus = "in-review";
+    } else if (status === "in-review" && pr.state === "MERGED") {
+      newStatus = "merged";
+    }
+
+    if (newStatus) {
+      const updatedContent = content.replace(
+        /^(## Status\s*\n).*$/m,
+        `$1${newStatus}`,
+      );
+      writeFileSync(pPath, updatedContent);
+      updated++;
+    }
+  }
+  return updated;
+}
+
+// ---------------------------------------------------------------------------
 // Git helpers
 // ---------------------------------------------------------------------------
 
@@ -545,6 +596,21 @@ async function getCheckedOutLocation(
     }
   }
   return null;
+}
+
+async function countBehindRemote(branch: string, cwd: string): Promise<number> {
+  try {
+    const g = git(cwd);
+    await g.fetch(["origin", branch]);
+    const log = await g.log({
+      from: branch,
+      to: `origin/${branch}`,
+      symmetric: false,
+    });
+    return log.total;
+  } catch {
+    return 0;
+  }
 }
 
 async function branchExists(branch: string, cwd: string): Promise<boolean> {
@@ -1201,10 +1267,13 @@ function generateClaudeLocalMd(wtPath: string, ctx: SessionContext): void {
     resolve(TEMPLATES_DIR, "claude-local-md.md"),
     "utf-8",
   );
-  const content = template
+  let content = template
     .replace(/\{\{planPath\}\}/g, ctx.planPath)
     .replace(/\{\{branch\}\}/g, ctx.branch)
     .replace(/\{\{target\}\}/g, ctx.target);
+  if (ctx.behindRemote && ctx.behindRemote > 0) {
+    content += `\n### Remote Changes\n\n**⚠ Branch \`${ctx.branch}\` is ${ctx.behindRemote} commit(s) behind \`origin/${ctx.branch}\`.** Run \`git pull\` before making changes.\n`;
+  }
   writeFileSync(resolve(claudeDir, "CLAUDE.local.md"), content);
 }
 
@@ -1613,6 +1682,9 @@ async function interactiveFlow(): Promise<void> {
   );
   prSpinner.stop(`Loaded ${activeEntries.length} PRs.`);
 
+  // Sync plan statuses based on PR state
+  syncPlanStatuses(activeEntries, prStatuses, dataDir, slug);
+
   // Re-sort with needsAttention now that PR data is available
   activeEntries.sort(([nameA, a], [nameB, b]) =>
     compareWorktreeEntries(highPriorityTarget)(
@@ -1632,7 +1704,6 @@ async function interactiveFlow(): Promise<void> {
   // Build select options with columnar layout
   const STATUS_PAD = 12;
   const CREATE_NEW = "__create_new__";
-  const maxNameLen = Math.max(...activeEntries.map(([name]) => name.length));
   const maxBranchLen = Math.max(
     ...activeEntries.map(([, entry]) => entry.branch.length),
   );
@@ -1640,16 +1711,9 @@ async function interactiveFlow(): Promise<void> {
     ...activeEntries.map(([name, entry]) => {
       const status = getStatusFromPlan(planFilePath(dataDir, slug, name));
       const pr = prStatuses.get(name) ?? null;
-      const hints: string[] = [];
-      if (pr?.mergeable === "CONFLICTING") hints.push(pc.red("⚠ conflicts"));
-      if (pr?.reviewDecision === "CHANGES_REQUESTED")
-        hints.push(pc.yellow("⚠ changes requested"));
       return {
         value: name,
-        label:
-          `${statusBadge(status, STATUS_PAD)} ${name.padEnd(maxNameLen + 2)}` +
-          `${pc.dim(entry.branch.padEnd(maxBranchLen + 2))}${prBadge(pr, false)}`,
-        hint: hints.join("  "),
+        label: `${statusBadge(status, STATUS_PAD)} ${entry.branch.padEnd(maxBranchLen + 2)}${prBadge(pr)}`,
       };
     }),
     {
@@ -1679,6 +1743,7 @@ async function interactiveFlow(): Promise<void> {
   const lastProgress = getLastProgress(pPath);
 
   const pr = prStatuses.get(selectedName) ?? null;
+  const behindRemote = await countBehindRemote(entry.branch, selectedWtPath);
   const infoLines = [
     `${pc.dim("Plan")}    ${pPath}`,
     `${pc.dim("Status")}  ${statusBadge(status)}`,
@@ -1691,6 +1756,11 @@ async function interactiveFlow(): Promise<void> {
   if (lastProgress) {
     infoLines.push(`${pc.dim("Last")}    ${lastProgress}`);
   }
+  if (behindRemote > 0) {
+    infoLines.push(
+      `${pc.yellow("⚠")}       ${pc.yellow(`${behindRemote} commit(s) behind origin/${entry.branch}`)}`,
+    );
+  }
   p.note(infoLines.join("\n"), selectedName);
 
   touchLastAccessed(dataDir, slug, selectedName);
@@ -1701,6 +1771,7 @@ async function interactiveFlow(): Promise<void> {
     status,
     lastProgress,
     pr,
+    behindRemote,
   });
 }
 
@@ -1912,7 +1983,39 @@ async function createCommand(): Promise<void> {
 // Clean flow
 // ---------------------------------------------------------------------------
 
-async function cleanFlow(): Promise<void> {
+async function archiveWorktrees(
+  names: string[],
+  data: WorktreesData,
+  repoRoot: string,
+  dataDir: string,
+  slug: string,
+): Promise<void> {
+  const archiveSpinner = p.spinner();
+  for (const name of names) {
+    const entry = data.worktrees[name];
+    archiveSpinner.start(`Archiving ${pc.bold(name)}...`);
+
+    const archiveWtPath = wtDirPath(dataDir, slug, name);
+    const g = git(repoRoot);
+    try {
+      await g.raw("worktree", "remove", archiveWtPath, "--force");
+    } catch {
+      // already gone
+    }
+    try {
+      await g.raw("worktree", "prune");
+    } catch {}
+
+    data.worktrees[name] = {
+      ...entry,
+      archivedAt: new Date().toISOString(),
+    };
+
+    archiveSpinner.stop(`Archived ${pc.bold(name)}.`);
+  }
+}
+
+async function cleanFlow(flags: CleanFlags): Promise<void> {
   p.intro(pc.bold(pc.red("claudet clean")));
 
   const dataDir = resolveDataDir();
@@ -1926,6 +2029,11 @@ async function cleanFlow(): Promise<void> {
 
   const { slug, repoRoot } = await pickRepo(dataDir);
 
+  const projectConfig = loadProjectConfig(dataDir, slug);
+  const protectedBranches = new Set(
+    projectConfig.protectedBranches ?? ["main", "dev", "prod"],
+  );
+
   const data = loadWorktrees(dataDir, slug);
   const allEntries = Object.entries(data.worktrees);
 
@@ -1937,6 +2045,7 @@ async function cleanFlow(): Promise<void> {
       delete data.worktrees[name];
       continue;
     }
+    if (protectedBranches.has(entry.branch)) continue;
     const g = git(repoRoot);
     const smokeWtPath = wtDirPath(dataDir, slug, name);
     try {
@@ -1961,7 +2070,10 @@ async function cleanFlow(): Promise<void> {
   }
 
   const activeEntries = Object.entries(data.worktrees).filter(
-    ([name, entry]) => !entry.archivedAt && !isSmokeTestWorktree(name),
+    ([name, entry]) =>
+      !entry.archivedAt &&
+      !isSmokeTestWorktree(name) &&
+      !protectedBranches.has(entry.branch),
   );
 
   if (activeEntries.length === 0) {
@@ -1979,6 +2091,49 @@ async function cleanFlow(): Promise<void> {
   );
   prSpinner.stop(`Loaded ${activeEntries.length} PRs.`);
 
+  // Sync plan statuses based on PR state
+  syncPlanStatuses(activeEntries, prStatuses, dataDir, slug);
+
+  // --merged: non-interactive batch archive of merged worktrees
+  if (flags.merged) {
+    const mergedEntries = activeEntries.filter(
+      ([name]) => prStatuses.get(name)?.state === "MERGED",
+    );
+
+    if (mergedEntries.length === 0) {
+      p.log.info("No merged worktrees found.");
+      saveWorktrees(dataDir, slug, data);
+      p.outro("Done.");
+      return;
+    }
+
+    for (const [name, entry] of mergedEntries) {
+      const pr = prStatuses.get(name);
+      p.note(`${pc.bold(entry.branch)}  ${prBadge(pr ?? null)}`);
+    }
+
+    const confirmed = await p.confirm({
+      message: `Archive ${pc.bold(String(mergedEntries.length))} merged worktree(s)?`,
+    });
+    if (cancelled(confirmed) || !confirmed) {
+      p.log.info("Cancelled.");
+      saveWorktrees(dataDir, slug, data);
+      p.outro("Done.");
+      return;
+    }
+
+    const mergedNames = mergedEntries.map(([name]) => name);
+    await archiveWorktrees(mergedNames, data, repoRoot, dataDir, slug);
+    saveWorktrees(dataDir, slug, data);
+    p.outro(pc.green(`Archived ${mergedNames.length} worktree(s).`));
+    return;
+  }
+
+  // Compute pre-selection: merged worktrees are pre-checked
+  const mergedNames = activeEntries
+    .filter(([name]) => prStatuses.get(name)?.state === "MERGED")
+    .map(([name]) => name);
+
   const STATUS_PAD = 12;
   const selected = await p.multiselect({
     message: "Select worktrees to remove",
@@ -1987,10 +2142,11 @@ async function cleanFlow(): Promise<void> {
       const pr = prStatuses.get(name);
       return {
         value: name,
-        label: `${statusBadge(status, STATUS_PAD)} ${name}`,
-        hint: `${pc.dim(entry.branch)}  ${prBadge(pr ?? null)}`,
+        label: entry.branch,
+        hint: `${statusBadge(status, STATUS_PAD)} ${prBadge(pr ?? null)}`,
       };
     }),
+    initialValues: mergedNames,
     required: false,
   });
 
@@ -2014,30 +2170,7 @@ async function cleanFlow(): Promise<void> {
     return;
   }
 
-  const archiveSpinner = p.spinner();
-  for (const name of selectedNames) {
-    const entry = data.worktrees[name];
-    archiveSpinner.start(`Archiving ${pc.bold(name)}...`);
-
-    const archiveWtPath = wtDirPath(dataDir, slug, name);
-    const g = git(repoRoot);
-    try {
-      await g.raw("worktree", "remove", archiveWtPath, "--force");
-    } catch {
-      // already gone
-    }
-    try {
-      await g.raw("worktree", "prune");
-    } catch {}
-
-    data.worktrees[name] = {
-      ...entry,
-      archivedAt: new Date().toISOString(),
-    };
-
-    archiveSpinner.stop(`Archived ${pc.bold(name)}.`);
-  }
-
+  await archiveWorktrees(selectedNames, data, repoRoot, dataDir, slug);
   saveWorktrees(dataDir, slug, data);
   p.outro(pc.green(`Archived ${selectedNames.length} worktree(s).`));
 }
@@ -2057,39 +2190,44 @@ async function statusLine(): Promise<void> {
 
   const dataDir = resolveDataDir();
   const wtMatch = cwd ? findWorktreeForCwd(cwd, dataDir) : null;
-  if (wtMatch) {
-    parts.push(wtMatch.name);
-    if (wtMatch.branch) parts.push(wtMatch.branch);
+  let branch: string | null = null;
+
+  if (wtMatch?.branch) {
+    branch = wtMatch.branch;
+  } else if (cwd) {
+    // Fallback: git branch
+    try {
+      branch = (await git(cwd).raw("symbolic-ref", "--short", "HEAD")).trim();
+    } catch {
+      // not a git repo or detached HEAD
+    }
   }
 
-  // Fallback: git branch
-  if (!wtMatch && cwd) {
-    try {
-      const branch = (
-        await git(cwd).raw("symbolic-ref", "--short", "HEAD")
-      ).trim();
-      if (branch) {
-        const worktreeMatch = cwd.match(/\/repos\/[^/]+\/worktrees\/([^/]+)/);
-        if (worktreeMatch) {
-          parts.push(worktreeMatch[1]);
-        } else {
-          const homePrefix = HOME + "/";
-          parts.push(
-            cwd.startsWith(homePrefix)
-              ? "~/" + cwd.slice(homePrefix.length)
-              : cwd,
-          );
+  if (branch) {
+    parts.push(branch);
+  } else if (cwd) {
+    const homePrefix = HOME + "/";
+    parts.push(
+      cwd.startsWith(homePrefix) ? "~/" + cwd.slice(homePrefix.length) : cwd,
+    );
+  }
+
+  // PR status
+  if (wtMatch) {
+    const entries: [string, WorktreeEntry][] = [
+      [
+        wtMatch.name,
+        loadWorktrees(dataDir, wtMatch.slug).worktrees[wtMatch.name],
+      ],
+    ].filter(([, e]) => !!e) as [string, WorktreeEntry][];
+    if (entries.length > 0) {
+      const meta = loadRepoMeta(dataDir, wtMatch.slug);
+      if (meta?.repoRoot) {
+        const prStatuses = await fetchPRStatuses(entries, meta.repoRoot);
+        const pr = prStatuses.get(wtMatch.name);
+        if (pr) {
+          parts.push(`PR #${pr.number} ${prStateLabel(pr)}`);
         }
-        parts.push(branch);
-      }
-    } catch {
-      if (cwd) {
-        const homePrefix = HOME + "/";
-        parts.push(
-          cwd.startsWith(homePrefix)
-            ? "~/" + cwd.slice(homePrefix.length)
-            : cwd,
-        );
       }
     }
   }
@@ -2339,7 +2477,7 @@ switch (subcommand) {
     });
     break;
   case "clean":
-    cleanFlow().catch((err) => {
+    cleanFlow(parseCleanFlags(process.argv.slice(3))).catch((err) => {
       console.error(err);
       process.exit(1);
     });
@@ -2411,6 +2549,9 @@ switch (subcommand) {
     --ticket <id>            Issue tracker ticket ID
     --skip-setup             Skip setup commands
     --repo <path>            Main repo root (auto-detected from worktrees)
+
+  ${pc.dim("claudet clean flags:")}
+    --merged                 Auto-archive all worktrees with merged PRs
 `);
     process.exit(subcommand === "--help" || subcommand === "-h" ? 0 : 1);
 }
