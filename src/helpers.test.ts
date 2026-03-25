@@ -10,6 +10,7 @@ import {
   readdirSync,
 } from "fs";
 import { join } from "path";
+import { tmpdir } from "os";
 import {
   tryParseJson,
   expandHome,
@@ -1370,12 +1371,22 @@ describe("mergeWorklogHooks", () => {
 
 describe("e2e smoke test", () => {
   const projectRoot = join(import.meta.dirname!, "..");
+  let sandboxHome: string;
+
+  beforeEach(() => {
+    sandboxHome = mkdtempSync(join(tmpdir(), "claudet-e2e-"));
+  });
+
+  afterEach(() => {
+    rmSync(sandboxHome, { recursive: true, force: true });
+  });
 
   it("compiles and runs --help without error", () => {
     const result = execSync("pnpm exec tsx src/claudet.ts --help", {
       cwd: projectRoot,
       encoding: "utf-8",
       timeout: 30_000,
+      env: { ...process.env, HOME: sandboxHome },
     });
     expect(result).toContain("claudet");
   });

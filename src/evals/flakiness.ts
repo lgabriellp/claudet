@@ -35,7 +35,11 @@ async function runScenarioOnce(
       allowedTools: scenario.allowedTools,
     });
 
-    const judgeResult = await runJudge(response.result, scenario.judgeCriteria);
+    const judgeResult = await runJudge(
+      response.result,
+      scenario.judgeCriteria,
+      fixture.sandboxHome,
+    );
 
     return judgeResult.verdicts.every((v) => v.met);
   } finally {

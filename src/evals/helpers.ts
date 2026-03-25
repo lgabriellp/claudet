@@ -12,6 +12,7 @@ export interface EvalFixturePaths {
   wtDir: string;
   planPath: string;
   claudeLocalMd: string;
+  sandboxHome: string;
 }
 
 interface SubjectResult {
@@ -52,7 +53,7 @@ export function isClaudeAvailable(): boolean {
 function execFileAsync(
   cmd: string,
   args: string[],
-  opts: { cwd?: string; timeout?: number },
+  opts: { cwd?: string; timeout?: number; env?: NodeJS.ProcessEnv },
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
@@ -60,6 +61,7 @@ function execFileAsync(
       args,
       {
         cwd: opts.cwd,
+        env: opts.env,
         encoding: "utf-8",
         timeout: opts.timeout,
         maxBuffer: 10 * 1024 * 1024,
@@ -157,6 +159,7 @@ Read the plan file at ${planPath} at session start.
 
 export function setupEvalFixture(scenario: EvalScenario): EvalFixturePaths {
   const tmpDir = join(TEST_TMP, scenario.name);
+  const sandboxHome = join(tmpDir, "home");
   const wtDir = join(tmpDir, "worktree");
   const planPath = join(tmpDir, "plan.md");
   const claudeDir = join(wtDir, ".claude");
@@ -166,6 +169,7 @@ export function setupEvalFixture(scenario: EvalScenario): EvalFixturePaths {
   // Clean any previous run
   rmSync(tmpDir, { recursive: true, force: true });
 
+  mkdirSync(sandboxHome, { recursive: true });
   mkdirSync(rulesDir, { recursive: true });
 
   // Write plan file
@@ -184,7 +188,7 @@ export function setupEvalFixture(scenario: EvalScenario): EvalFixturePaths {
     // non-critical — continue without git
   }
 
-  return { tmpDir, wtDir, planPath, claudeLocalMd };
+  return { tmpDir, wtDir, planPath, claudeLocalMd, sandboxHome };
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +218,7 @@ export async function runSubject(
   const out = await execFileAsync("claude", args, {
     cwd: fixture.wtDir,
     timeout: 240_000,
+    env: { ...process.env, HOME: fixture.sandboxHome },
   });
 
   const parsed = JSON.parse(out);
@@ -301,6 +306,7 @@ export interface JudgeResult {
 export async function runJudge(
   response: string,
   criteria: string[],
+  sandboxHome?: string,
 ): Promise<JudgeResult> {
   const judgePrompt = buildJudgePrompt(response, criteria);
 
@@ -317,7 +323,10 @@ export async function runJudge(
     JUDGE_SCHEMA,
   ];
 
-  const out = await execFileAsync("claude", args, { timeout: 60_000 });
+  const out = await execFileAsync("claude", args, {
+    timeout: 60_000,
+    ...(sandboxHome ? { env: { ...process.env, HOME: sandboxHome } } : {}),
+  });
 
   const parsed = JSON.parse(out);
   const cost = parsed.cost_usd ?? 0;

@@ -2,9 +2,10 @@
 // AI behavioral evals — verifies Claude follows worktree/plan protocols
 // ---------------------------------------------------------------------------
 
-import { describe, it, expect, afterAll } from "vitest";
-import { mkdirSync } from "fs";
+import { describe, it, expect, afterAll, beforeEach, afterEach } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync } from "fs";
 import { join } from "path";
+import { tmpdir } from "os";
 import {
   setupEvalFixture,
   runSubject,
@@ -86,6 +87,7 @@ describe.skipIf(!canRun).concurrent("AI evals", () => {
           const judgeResult: JudgeResult = await runJudge(
             response.result,
             scenario.judgeCriteria,
+            fixture.sandboxHome,
           );
 
           costEntries.push({
@@ -112,6 +114,16 @@ describe.skipIf(!canRun).concurrent("AI evals", () => {
 // ---------------------------------------------------------------------------
 
 describe.skipIf(!canRun)("Judge calibration", () => {
+  let sandboxHome: string;
+
+  beforeEach(() => {
+    sandboxHome = mkdtempSync(join(tmpdir(), "claudet-eval-judge-"));
+  });
+
+  afterEach(() => {
+    rmSync(sandboxHome, { recursive: true, force: true });
+  });
+
   it("rejects a deliberately bad response", async () => {
     const badResponse = `I'll skip reading the plan file since we don't need it.
 Let me jump straight into coding the implementation:
@@ -133,7 +145,7 @@ No need to update the progress section — let's move on to the next task.`;
       "Did Claude append to the Progress section?",
     ];
 
-    const judgeResult = await runJudge(badResponse, criteria);
+    const judgeResult = await runJudge(badResponse, criteria, sandboxHome);
 
     costEntries.push({
       name: "judge-calibration",
