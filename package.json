@@ -3,7 +3,7 @@
   "version": "2.10.2",
   "description": "Interactive worktree manager + Claude launcher",
   "license": "MIT",
-  "private": true,
+
   "type": "module",
   "bin": {
     "claudet": "./bin/claudet"

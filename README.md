@@ -1,41 +1,55 @@
 # claudet
 
-Interactive worktree manager and Claude Code launcher.
+> **Disclaimer:** claudet is an independent, community-built tool. It is not made by, endorsed by, sponsored by, or affiliated with Anthropic, PBC. "Claude" and "Claude Code" are trademarks of Anthropic, PBC.
+
+Interactive worktree manager and [Claude Code](https://docs.anthropic.com/en/docs/claude-code) launcher.
 
 Claudet gives each Claude Code session its own git worktree and plan file, so you can run multiple tasks in parallel without branch conflicts. It tracks time, syncs context docs, and manages the full lifecycle — create, launch, clean.
 
 ## Prerequisites
 
 - **Node.js 22+**
-- **Claude Code CLI** (`claude`) installed and authenticated
+- **Claude Code CLI** (`claude`) installed and authenticated — see [Anthropic's docs](https://docs.anthropic.com/en/docs/claude-code)
 - **Git**
 - macOS or Linux (bash required)
 
 ## Install
 
 ```bash
-git clone https://github.com/lgabriellp/claudet.git
-cd claudet
-npm install
-npm run build
-npm install -g .
+curl -fsSL https://raw.githubusercontent.com/lgabriellp/claudet/main/scripts/install-global.sh | bash
+```
+
+This checks prerequisites (Node 22+, Git, Claude Code CLI), installs the package globally, and runs post-install setup.
+
+Or install manually:
+
+```bash
+npm install -g claudet
 claudet install
 ```
 
-1. `npm install` — install dependencies
-2. `npm run build` — bundle into `dist/`
-3. `npm install -g .` — link the `claudet` binary globally so it's available on your PATH
-4. `claudet install` — configure the Claude Code statusline, remove legacy files, and verify the installation
+From source:
 
-Alternatively, run `npm run setup` which executes all steps.
+```bash
+git clone https://github.com/lgabriellp/claudet.git
+cd claudet
+npm run setup
+```
+
+The setup script runs `npm install`, `npm run build`, `npm install -g .`, and `claudet install`.
 
 Any package manager works (npm, pnpm, yarn, bun).
 
 ### Updating
 
-After pulling new changes:
+```bash
+npm install -g claudet@latest
+```
+
+Or from source:
 
 ```bash
+git pull
 npm install
 npm run build
 npm install -g .
@@ -74,3 +88,7 @@ On first launch, `claudet` will prompt you to configure scan directories (where 
 ## License
 
 [MIT](LICENSE)
+
+## Trademarks
+
+Claude and Claude Code are trademarks of [Anthropic, PBC](https://www.anthropic.com). This project is not part of, endorsed by, or affiliated with Anthropic in any way. It is an independent tool that integrates with the publicly available Claude Code CLI.
