@@ -37,7 +37,7 @@ fi
 
 echo ""
 info "Installing claudet via $PM..."
-$PM install -g claudet 2>&1 | tail -3
+$PM install -g @lgabriellp/claudet 2>&1 | tail -3
 ok "claudet installed"
 
 echo ""

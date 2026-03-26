@@ -24,7 +24,7 @@ This checks prerequisites (Node 22+, Git, Claude Code CLI), installs the package
 Or install manually:
 
 ```bash
-npm install -g claudet
+npm install -g @lgabriellp/claudet
 claudet install
 ```
 
@@ -43,7 +43,7 @@ Any package manager works (npm, pnpm, yarn, bun).
 ### Updating
 
 ```bash
-npm install -g claudet@latest
+npm install -g @lgabriellp/claudet@latest
 ```
 
 Or from source:
