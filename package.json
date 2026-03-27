@@ -1,6 +1,6 @@
 {
   "name": "@lgabriellp/claudet",
-  "version": "2.10.6",
+  "version": "2.11.0",
   "description": "Interactive worktree manager + Claude launcher",
   "license": "MIT",
   "type": "module",

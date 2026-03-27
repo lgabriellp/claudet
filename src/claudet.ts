@@ -1586,6 +1586,7 @@ async function interactiveFlow(): Promise<void> {
   cleanStaleSessionFiles(tmpdir());
   ensureWorklogHooks();
   ensureContextDocs();
+  await ensureToolPermissions();
 
   const { slug, repoRoot } = await pickRepo(dataDir);
 
@@ -2425,6 +2426,201 @@ async function initCommand(): Promise<void> {
   p.intro(`${pc.bold(pc.cyan("claudet init"))} — Configure global settings`);
   await runInitSetup();
   p.outro("Configuration saved.");
+}
+
+// ---------------------------------------------------------------------------
+// Tool permission setup — triggered when settings.local.json is missing
+// ---------------------------------------------------------------------------
+
+interface ToolGroup {
+  label: string;
+  hint: string;
+  tools: string[];
+}
+
+const READ_ONLY_TOOL_GROUPS: ToolGroup[] = [
+  {
+    label: "Git read-only",
+    hint: "git log, diff, status, branch, show, stash list",
+    tools: [
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git status:*)",
+      "Bash(git branch:*)",
+      "Bash(git show:*)",
+      "Bash(git stash list:*)",
+    ],
+  },
+  {
+    label: "File search & read",
+    hint: "Read, Glob, Grep",
+    tools: ["Read", "Glob", "Grep"],
+  },
+  {
+    label: "Web access",
+    hint: "WebFetch, WebSearch",
+    tools: ["WebFetch", "WebSearch"],
+  },
+  {
+    label: "Text processing",
+    hint: "jq, wc, sort, head, tail",
+    tools: [
+      "Bash(jq:*)",
+      "Bash(wc:*)",
+      "Bash(sort:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+    ],
+  },
+  {
+    label: "Directory listing",
+    hint: "tree, ls",
+    tools: ["Bash(tree:*)", "Bash(ls:*)"],
+  },
+];
+
+const WRITE_TOOL_GROUPS: ToolGroup[] = [
+  {
+    label: "Git write",
+    hint: "git stash, checkout, worktree, tag",
+    tools: [
+      "Bash(git stash:*)",
+      "Bash(git checkout:*)",
+      "Bash(git worktree:*)",
+      "Bash(git tag:*)",
+    ],
+  },
+  {
+    label: "Node.js (pnpm)",
+    hint: "install, add, lint, test, typecheck, format, run, exec, e2e",
+    tools: [
+      "Bash(pnpm install:*)",
+      "Bash(pnpm add:*)",
+      "Bash(pnpm lint:*)",
+      "Bash(pnpm test:*)",
+      "Bash(pnpm typecheck:*)",
+      "Bash(pnpm format:*)",
+      "Bash(pnpm run:*)",
+      "Bash(pnpm exec:*)",
+      "Bash(pnpm e2e:test:*)",
+    ],
+  },
+  {
+    label: "Node.js (npm)",
+    hint: "npm install, test, run, etc.",
+    tools: ["Bash(npm:*)"],
+  },
+  {
+    label: "Python (poetry)",
+    hint: "install, lock, add, run",
+    tools: [
+      "Bash(poetry install:*)",
+      "Bash(poetry lock:*)",
+      "Bash(poetry add:*)",
+      "Bash(poetry run:*)",
+    ],
+  },
+  {
+    label: "Mobile / Expo",
+    hint: "expo, adb, gradlew, maestro-cli",
+    tools: [
+      "Bash(pnpm exec expo start:*)",
+      "Bash(pnpm exec expo export:*)",
+      "Bash(adb:*)",
+      "Bash(./gradlew:*)",
+      "Bash(./android/gradlew:*)",
+      "Bash(maestro-cli:*)",
+    ],
+  },
+  {
+    label: "Shell utilities",
+    hint: "curl, cat, echo, xargs, timeout",
+    tools: [
+      "Bash(curl:*)",
+      "Bash(cat:*)",
+      "Bash(echo:*)",
+      "Bash(xargs:*)",
+      "Bash(timeout:*)",
+    ],
+  },
+  {
+    label: "Process management",
+    hint: "pkill, lsof",
+    tools: ["Bash(pkill:*)", "Bash(lsof:*)"],
+  },
+];
+
+async function ensureToolPermissions(): Promise<void> {
+  const settings = tryParseJson<Record<string, unknown>>(
+    tryReadFileSync(GLOBAL_SETTINGS_FILE),
+    {},
+  );
+  const permissions = settings.permissions as
+    | Record<string, unknown>
+    | undefined;
+  if (permissions?.allow) return;
+
+  p.log.info("No tool permissions configured — let's set them up.");
+
+  // Ask about read-only tools
+  const enableReadOnly = await p.confirm({
+    message: "Enable read-only tools? (safe — no side effects)",
+    initialValue: true,
+  });
+  if (cancelled(enableReadOnly)) bail("Cancelled.");
+
+  const selectedGroups: ToolGroup[] = [];
+
+  if (enableReadOnly) {
+    selectedGroups.push(...READ_ONLY_TOOL_GROUPS);
+  } else {
+    const readOnlySelection = await p.multiselect({
+      message: "Select read-only tool groups to enable",
+      options: READ_ONLY_TOOL_GROUPS.map((g) => ({
+        value: g.label,
+        label: g.label,
+        hint: g.hint,
+      })),
+      required: false,
+    });
+    if (cancelled(readOnlySelection)) bail("Cancelled.");
+    for (const label of readOnlySelection as string[]) {
+      const group = READ_ONLY_TOOL_GROUPS.find((g) => g.label === label);
+      if (group) selectedGroups.push(group);
+    }
+  }
+
+  // Ask about write tools
+  const writeSelection = await p.multiselect({
+    message: "Select write tool groups to enable",
+    options: WRITE_TOOL_GROUPS.map((g) => ({
+      value: g.label,
+      label: g.label,
+      hint: g.hint,
+    })),
+    required: false,
+  });
+  if (cancelled(writeSelection)) bail("Cancelled.");
+  for (const label of writeSelection as string[]) {
+    const group = WRITE_TOOL_GROUPS.find((g) => g.label === label);
+    if (group) selectedGroups.push(group);
+  }
+
+  const allow = selectedGroups.flatMap((g) => g.tools);
+  if (!permissions) {
+    settings.permissions = { allow };
+  } else {
+    permissions.allow = allow;
+  }
+
+  const dir = dirname(GLOBAL_SETTINGS_FILE);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(GLOBAL_SETTINGS_FILE, JSON.stringify(settings, null, 2) + "\n");
+
+  const summary = selectedGroups
+    .map((g) => `  ${pc.green("✓")} ${g.label} ${pc.dim(`(${g.hint})`)}`)
+    .join("\n");
+  p.note(summary, "Tool permissions saved");
 }
 
 // ---------------------------------------------------------------------------
