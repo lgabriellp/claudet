@@ -4,6 +4,7 @@
 
 import { createHash } from "crypto";
 import { z } from "zod";
+import type { Colors } from "picocolors/types";
 
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
 
@@ -232,6 +233,116 @@ export function computeReviewDecision(
     if (state === "APPROVED") return "APPROVED";
   }
   return "NONE";
+}
+
+export interface PRStatus {
+  state: "OPEN" | "MERGED" | "CLOSED";
+  url: string;
+  number: number;
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+  reviewDecision: ReviewDecision;
+}
+
+// ---------------------------------------------------------------------------
+// UI formatting
+// ---------------------------------------------------------------------------
+
+export function statusBadge(status: string, pad = 0, colors: Colors): string {
+  const text = pad > 0 ? status.padEnd(pad) : status;
+  switch (status) {
+    case "in-progress":
+      return colors.yellow(text);
+    case "in-review":
+      return colors.blue(text);
+    case "done":
+    case "merged":
+      return colors.green(text);
+    case "pending":
+      return colors.dim(text);
+    default:
+      return colors.dim(text);
+  }
+}
+
+export function reviewSuffix(pr: PRStatus, colors: Colors): string {
+  switch (pr.reviewDecision) {
+    case "APPROVED":
+      return colors.green("✓ approved");
+    case "CHANGES_REQUESTED":
+      return colors.yellow("⚠ changes requested");
+    case "REVIEW_REQUESTED":
+      return colors.dim("⏳ review pending");
+    default:
+      return "";
+  }
+}
+
+export function prStateLabel(pr: PRStatus): string {
+  if (pr.state === "OPEN" && pr.mergeable === "CONFLICTING") return "conflicts";
+  if (pr.state === "OPEN") return "open";
+  if (pr.state === "MERGED") return "merged";
+  return "closed";
+}
+
+export function prBadge(pr: PRStatus | null, colors: Colors): string {
+  if (!pr) return colors.dim("no PR");
+  const label = prStateLabel(pr);
+  const review = pr.state === "OPEN" ? reviewSuffix(pr, colors) : "";
+  const reviewPart = review ? `  ${review}` : "";
+  const text = `PR #${pr.number} ${label}`;
+  switch (label) {
+    case "conflicts":
+      return colors.red(text) + reviewPart;
+    case "open":
+      return colors.green(text) + reviewPart;
+    case "merged":
+      return colors.magenta(text);
+    case "closed":
+      return colors.red(text);
+    default:
+      return colors.dim(text);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Plan content generation
+// ---------------------------------------------------------------------------
+
+export function generatePlanContent(
+  name: string,
+  opts: { target?: string; ticket?: string },
+  date: string,
+  time: string,
+): string {
+  const ticketSection = opts.ticket ? `\n## Ticket\n${opts.ticket}\n` : "";
+  return `# ${name}
+
+## Context
+<!-- Why this change is being made -->
+
+## Objective
+<!-- What will be done -->
+${ticketSection}
+## Target Branch
+${opts.target || "dev"}
+
+## Key Files
+<!-- Files that will be created/modified -->
+
+## Test Scenarios
+<!-- Test plan grouped by tier -->
+
+## Status
+pending
+
+## Time Tracked
+0m
+
+## Progress
+<!-- Append-only log. Claude and user append entries as work progresses. -->
+<!-- ALL change requests must be logged here, even when requested outside Claude plan mode. -->
+- ${date} ${time}: Created worktree, started planning
+`;
 }
 
 export function prNeedsAttention(
@@ -566,10 +677,29 @@ export function scanForGitRepos(scanDirs: string[], maxDepth = 2): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Autocomplete / branch selection helpers
+// ---------------------------------------------------------------------------
+
+export function matchesSearch(search: string, ...targets: string[]): boolean {
+  const s = search.toLowerCase();
+  return targets.some((t) => t.toLowerCase().includes(s));
+}
+
+export function sortBranchesDefaultFirst(
+  branches: string[],
+  defaultBranch: string,
+): string[] {
+  if (!branches.includes(defaultBranch)) return branches;
+  return [defaultBranch, ...branches.filter((b) => b !== defaultBranch)];
+}
+
+// ---------------------------------------------------------------------------
 // Branch name validation
 // ---------------------------------------------------------------------------
 
-export function validateBranchName(name: string): string | undefined {
+export function validateBranchName(
+  name: string | undefined,
+): string | undefined {
   if (!name) return "Branch name is required";
   if (name.startsWith("-")) return "Branch name cannot start with '-'";
   if (name.endsWith(".lock")) return "Branch name cannot end with '.lock'";

@@ -44,9 +44,19 @@ import {
   getBranchFromPlan,
   getPlanSection,
   computeWorklogEvents,
+  statusBadge,
+  reviewSuffix,
+  prStateLabel,
+  prBadge,
+  generatePlanContent,
+  matchesSearch,
+  sortBranchesDefaultFirst,
+  type PRStatus,
   type WorktreeSortEntry,
   type ReviewInfo,
 } from "./helpers.js";
+import pico from "picocolors";
+import type { Colors } from "picocolors/types";
 
 const TEST_TMP = join(import.meta.dirname!, "..", ".test-tmp");
 
@@ -1793,5 +1803,271 @@ describe("computeWorklogEvents", () => {
     expect(result.events).toHaveLength(0);
     expect(result.updatedPlanContent).toBeNull();
     expect(result.stateUpdates).toEqual({});
+  });
+});
+
+// ---------------------------------------------------------------------------
+// statusBadge
+// ---------------------------------------------------------------------------
+
+const noColors: Colors = pico.createColors(false);
+
+describe("statusBadge", () => {
+  it("in-progress → yellow (passthrough with noColors)", () => {
+    expect(statusBadge("in-progress", 0, noColors)).toBe("in-progress");
+  });
+
+  it("in-review → blue", () => {
+    expect(statusBadge("in-review", 0, noColors)).toBe("in-review");
+  });
+
+  it("done → green", () => {
+    expect(statusBadge("done", 0, noColors)).toBe("done");
+  });
+
+  it("merged → green", () => {
+    expect(statusBadge("merged", 0, noColors)).toBe("merged");
+  });
+
+  it("pending → dim", () => {
+    expect(statusBadge("pending", 0, noColors)).toBe("pending");
+  });
+
+  it("pads text to requested width", () => {
+    const result = statusBadge("done", 15, noColors);
+    expect(result).toBe("done".padEnd(15));
+    expect(result.length).toBe(15);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// reviewSuffix
+// ---------------------------------------------------------------------------
+
+describe("reviewSuffix", () => {
+  const makePR = (overrides: Partial<PRStatus> = {}): PRStatus => ({
+    state: "OPEN",
+    url: "https://github.com/test/test/pull/42",
+    number: 42,
+    mergeable: "MERGEABLE",
+    reviewDecision: "NONE",
+    ...overrides,
+  });
+
+  it("APPROVED → ✓ approved", () => {
+    expect(reviewSuffix(makePR({ reviewDecision: "APPROVED" }), noColors)).toBe(
+      "✓ approved",
+    );
+  });
+
+  it("CHANGES_REQUESTED → ⚠ changes requested", () => {
+    expect(
+      reviewSuffix(makePR({ reviewDecision: "CHANGES_REQUESTED" }), noColors),
+    ).toBe("⚠ changes requested");
+  });
+
+  it("REVIEW_REQUESTED → ⏳ review pending", () => {
+    expect(
+      reviewSuffix(makePR({ reviewDecision: "REVIEW_REQUESTED" }), noColors),
+    ).toBe("⏳ review pending");
+  });
+
+  it("NONE → empty string", () => {
+    expect(reviewSuffix(makePR({ reviewDecision: "NONE" }), noColors)).toBe("");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// prStateLabel
+// ---------------------------------------------------------------------------
+
+describe("prStateLabel", () => {
+  const makePR = (overrides: Partial<PRStatus> = {}): PRStatus => ({
+    state: "OPEN",
+    url: "https://github.com/test/test/pull/42",
+    number: 42,
+    mergeable: "MERGEABLE",
+    reviewDecision: "NONE",
+    ...overrides,
+  });
+
+  it("OPEN + CONFLICTING → conflicts", () => {
+    expect(prStateLabel(makePR({ mergeable: "CONFLICTING" }))).toBe(
+      "conflicts",
+    );
+  });
+
+  it("OPEN + MERGEABLE → open", () => {
+    expect(prStateLabel(makePR())).toBe("open");
+  });
+
+  it("MERGED → merged", () => {
+    expect(prStateLabel(makePR({ state: "MERGED" }))).toBe("merged");
+  });
+
+  it("CLOSED → closed", () => {
+    expect(prStateLabel(makePR({ state: "CLOSED" }))).toBe("closed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// prBadge
+// ---------------------------------------------------------------------------
+
+describe("prBadge", () => {
+  const makePR = (overrides: Partial<PRStatus> = {}): PRStatus => ({
+    state: "OPEN",
+    url: "https://github.com/test/test/pull/42",
+    number: 42,
+    mergeable: "MERGEABLE",
+    reviewDecision: "NONE",
+    ...overrides,
+  });
+
+  it("null → no PR", () => {
+    expect(prBadge(null, noColors)).toBe("no PR");
+  });
+
+  it("open PR → PR #N open + review suffix", () => {
+    const result = prBadge(
+      makePR({ reviewDecision: "REVIEW_REQUESTED" }),
+      noColors,
+    );
+    expect(result).toContain("PR #42 open");
+    expect(result).toContain("⏳ review pending");
+  });
+
+  it("conflicting PR → PR #N conflicts + review suffix", () => {
+    const result = prBadge(
+      makePR({ mergeable: "CONFLICTING", reviewDecision: "APPROVED" }),
+      noColors,
+    );
+    expect(result).toContain("PR #42 conflicts");
+    expect(result).toContain("✓ approved");
+  });
+
+  it("merged PR → PR #N merged (no review suffix)", () => {
+    const result = prBadge(makePR({ state: "MERGED" }), noColors);
+    expect(result).toBe("PR #42 merged");
+  });
+
+  it("closed PR → PR #N closed (no review suffix)", () => {
+    const result = prBadge(makePR({ state: "CLOSED" }), noColors);
+    expect(result).toBe("PR #42 closed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// generatePlanContent
+// ---------------------------------------------------------------------------
+
+describe("generatePlanContent", () => {
+  it("includes all sections in order", () => {
+    const content = generatePlanContent("my-plan", {}, "2026-03-27", "10:00");
+    const sections = [...content.matchAll(/^## (.+)$/gm)].map((m) => m[1]);
+    expect(sections).toEqual([
+      "Context",
+      "Objective",
+      "Target Branch",
+      "Key Files",
+      "Test Scenarios",
+      "Status",
+      "Time Tracked",
+      "Progress",
+    ]);
+  });
+
+  it("includes Ticket section when provided", () => {
+    const content = generatePlanContent(
+      "my-plan",
+      { ticket: "PROJ-123" },
+      "2026-03-27",
+      "10:00",
+    );
+    expect(content).toContain("## Ticket\nPROJ-123");
+  });
+
+  it("omits Ticket section when absent", () => {
+    const content = generatePlanContent("my-plan", {}, "2026-03-27", "10:00");
+    expect(content).not.toContain("## Ticket");
+  });
+
+  it("uses provided target; defaults to dev when absent", () => {
+    const withTarget = generatePlanContent(
+      "my-plan",
+      { target: "main" },
+      "2026-03-27",
+      "10:00",
+    );
+    expect(withTarget).toContain("## Target Branch\nmain");
+
+    const withoutTarget = generatePlanContent(
+      "my-plan",
+      {},
+      "2026-03-27",
+      "10:00",
+    );
+    expect(withoutTarget).toContain("## Target Branch\ndev");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// matchesSearch
+// ---------------------------------------------------------------------------
+
+describe("matchesSearch", () => {
+  it("matches exact string", () => {
+    expect(matchesSearch("hello", "hello")).toBe(true);
+  });
+
+  it("matches substring (case-insensitive)", () => {
+    expect(matchesSearch("DEV", "feature/dev-branch")).toBe(true);
+  });
+
+  it("returns false for no match", () => {
+    expect(matchesSearch("xyz", "hello", "world")).toBe(false);
+  });
+
+  it("matches against any of multiple targets", () => {
+    expect(matchesSearch("world", "hello", "world")).toBe(true);
+    expect(matchesSearch("hello", "hello", "world")).toBe(true);
+  });
+
+  it("empty search matches everything", () => {
+    expect(matchesSearch("", "anything")).toBe(true);
+  });
+
+  it("handles special regex characters safely", () => {
+    expect(matchesSearch("(foo)", "prefix(foo)suffix")).toBe(true);
+    expect(matchesSearch("[bar]", "has[bar]inside")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sortBranchesDefaultFirst
+// ---------------------------------------------------------------------------
+
+describe("sortBranchesDefaultFirst", () => {
+  it("moves default branch to front", () => {
+    expect(sortBranchesDefaultFirst(["a", "main", "b"], "main")).toEqual([
+      "main",
+      "a",
+      "b",
+    ]);
+  });
+
+  it("returns branches unchanged when default not present", () => {
+    const branches = ["a", "b", "c"];
+    expect(sortBranchesDefaultFirst(branches, "main")).toEqual(["a", "b", "c"]);
+  });
+
+  it("handles single-element array", () => {
+    expect(sortBranchesDefaultFirst(["main"], "main")).toEqual(["main"]);
+  });
+
+  it("doesn't duplicate the default branch", () => {
+    const result = sortBranchesDefaultFirst(["main", "dev", "feat"], "main");
+    expect(result.filter((b) => b === "main")).toHaveLength(1);
+    expect(result).toEqual(["main", "dev", "feat"]);
   });
 });

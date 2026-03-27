@@ -48,11 +48,19 @@ import {
   compareWorktreeEntries,
   computeReviewDecision,
   prNeedsAttention,
+  statusBadge,
+  reviewSuffix,
+  prStateLabel,
+  prBadge,
+  generatePlanContent,
+  type PRStatus,
   upsertPlanSection,
   getTargetFromPlan,
   getBranchFromPlan,
   getPlanSection,
   computeWorklogEvents,
+  matchesSearch,
+  sortBranchesDefaultFirst,
   parseCleanFlags,
   type CleanFlags,
   type CreateFlags,
@@ -218,6 +226,7 @@ interface WorktreeEntry {
   target: string;
   archivedAt: string | null;
   lastAccessedAt?: string;
+  lastSessionId?: string;
 }
 
 interface WorktreesData {
@@ -248,14 +257,6 @@ interface SessionState {
   objective: string | null;
 }
 
-interface PRStatus {
-  state: "OPEN" | "MERGED" | "CLOSED";
-  url: string;
-  number: number;
-  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
-  reviewDecision: ReviewDecision;
-}
-
 interface SessionContext {
   planPath: string;
   branch: string;
@@ -264,6 +265,7 @@ interface SessionContext {
   lastProgress: string | null;
   pr: PRStatus | null;
   behindRemote?: number;
+  lastSessionId?: string;
 }
 
 interface RepoInfo {
@@ -409,66 +411,6 @@ function getOctokit(): Octokit | null {
 }
 
 // ---------------------------------------------------------------------------
-// Status badge formatting
-// ---------------------------------------------------------------------------
-
-function statusBadge(status: string, pad = 0): string {
-  const text = pad > 0 ? status.padEnd(pad) : status;
-  switch (status) {
-    case "in-progress":
-      return pc.yellow(text);
-    case "review":
-      return pc.blue(text);
-    case "done":
-      return pc.green(text);
-    case "pending":
-      return pc.dim(text);
-    default:
-      return pc.dim(text);
-  }
-}
-
-function reviewSuffix(pr: PRStatus): string {
-  switch (pr.reviewDecision) {
-    case "APPROVED":
-      return pc.green("✓ approved");
-    case "CHANGES_REQUESTED":
-      return pc.yellow("⚠ changes requested");
-    case "REVIEW_REQUESTED":
-      return pc.dim("⏳ review pending");
-    default:
-      return "";
-  }
-}
-
-function prStateLabel(pr: PRStatus): string {
-  if (pr.state === "OPEN" && pr.mergeable === "CONFLICTING") return "conflicts";
-  if (pr.state === "OPEN") return "open";
-  if (pr.state === "MERGED") return "merged";
-  return "closed";
-}
-
-function prBadge(pr: PRStatus | null): string {
-  if (!pr) return pc.dim("no PR");
-  const label = prStateLabel(pr);
-  const review = pr.state === "OPEN" ? reviewSuffix(pr) : "";
-  const reviewPart = review ? `  ${review}` : "";
-  const text = `PR #${pr.number} ${label}`;
-  switch (label) {
-    case "conflicts":
-      return pc.red(text) + reviewPart;
-    case "open":
-      return pc.green(text) + reviewPart;
-    case "merged":
-      return pc.magenta(text);
-    case "closed":
-      return pc.red(text);
-    default:
-      return pc.dim(text);
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Plan file management
 // ---------------------------------------------------------------------------
 
@@ -486,35 +428,12 @@ function createPlanFile(
     const now = new Date();
     const date = now.toISOString().split("T")[0];
     const time = now.toTimeString().slice(0, 5);
-    const ticketSection = entry.ticket ? `\n## Ticket\n${entry.ticket}\n` : "";
-    const content = `# ${name}
-
-## Context
-<!-- Why this change is being made -->
-
-## Objective
-<!-- What will be done -->
-${ticketSection}
-## Target Branch
-${entry.target || "dev"}
-
-## Key Files
-<!-- Files that will be created/modified -->
-
-## Test Scenarios
-<!-- Test plan grouped by tier -->
-
-## Status
-pending
-
-## Time Tracked
-0m
-
-## Progress
-<!-- Append-only log. Claude and user append entries as work progresses. -->
-<!-- ALL change requests must be logged here, even when requested outside Claude plan mode. -->
-- ${date} ${time}: Created worktree, started planning
-`;
+    const content = generatePlanContent(
+      name,
+      { target: entry.target, ticket: entry.ticket },
+      date,
+      time,
+    );
     writeFileSync(pPath, content);
   }
 
@@ -969,6 +888,14 @@ async function worklogStart(): Promise<void> {
     objective,
   };
   writeFileSync(sessionStatePath(sessionId), JSON.stringify(state));
+
+  // Save session ID to worktree metadata for --resume on next launch
+  const wtData = loadWorktrees(dataDir, wtMatch.slug);
+  const wtEntry = wtData.worktrees[wtMatch.name];
+  if (wtEntry) {
+    wtEntry.lastSessionId = sessionId;
+    saveWorktrees(dataDir, wtMatch.slug, wtData);
+  }
 }
 
 async function worklogTick(): Promise<void> {
@@ -1284,13 +1211,31 @@ function launchClaude(cwd: string, ctx?: SessionContext): void {
     generateClaudeLocalMd(cwd, ctx);
   }
   const args: string[] = [];
-  if (ctx?.planPath) {
+  if (ctx?.lastSessionId) {
+    args.push("--resume", ctx.lastSessionId);
+  } else if (ctx?.planPath) {
     if (ctx.status === "pending") {
       args.push("load plan and start planning");
     } else {
       args.push("load plan");
     }
   }
+  args.push(
+    "--allowedTools",
+    "Read",
+    "Glob",
+    "Grep",
+    "Bash(git log:*)",
+    "Bash(git diff:*)",
+    "Bash(git status:*)",
+    "Bash(git branch:*)",
+    "Bash(git show:*)",
+    "WebFetch",
+    "WebSearch",
+  );
+  // Allow reading all sibling worktrees (cwd is <dataDir>/repos/<slug>/worktrees/<name>)
+  const worktreesRoot = dirname(cwd);
+  args.push("--add-dir", worktreesRoot);
   const child = spawn("claude", args, {
     cwd,
     stdio: "inherit",
@@ -1713,7 +1658,7 @@ async function interactiveFlow(): Promise<void> {
       const pr = prStatuses.get(name) ?? null;
       return {
         value: name,
-        label: `${statusBadge(status, STATUS_PAD)} ${entry.branch.padEnd(maxBranchLen + 2)}${prBadge(pr)}`,
+        label: `${statusBadge(status, STATUS_PAD, pc)} ${entry.branch.padEnd(maxBranchLen + 2)}${prBadge(pr, pc)}`,
       };
     }),
     {
@@ -1723,9 +1668,17 @@ async function interactiveFlow(): Promise<void> {
     },
   ];
 
-  const selection = await p.select({
+  const selection = await p.autocomplete({
     message: "Select worktree",
     options,
+    maxItems: options.length,
+    placeholder: "Type to search…",
+    filter: (search, opt) => {
+      if (opt.value === CREATE_NEW) return true;
+      const name = opt.value as string;
+      const entry = data.worktrees[name];
+      return matchesSearch(search, name, entry.branch);
+    },
   });
 
   if (cancelled(selection)) bail("Cancelled.");
@@ -1746,11 +1699,11 @@ async function interactiveFlow(): Promise<void> {
   const behindRemote = await countBehindRemote(entry.branch, selectedWtPath);
   const infoLines = [
     `${pc.dim("Plan")}    ${pPath}`,
-    `${pc.dim("Status")}  ${statusBadge(status)}`,
+    `${pc.dim("Status")}  ${statusBadge(status, 0, pc)}`,
   ];
   if (pr) {
     infoLines.push(
-      `${pc.dim("PR")}      ${prBadge(pr)}  ${pc.underline(pr.url)}`,
+      `${pc.dim("PR")}      ${prBadge(pr, pc)}  ${pc.underline(pr.url)}`,
     );
   }
   if (lastProgress) {
@@ -1772,6 +1725,7 @@ async function interactiveFlow(): Promise<void> {
     lastProgress,
     pr,
     behindRemote,
+    lastSessionId: entry.lastSessionId,
   });
 }
 
@@ -1870,12 +1824,8 @@ async function createNewWorktreeFlow(
   }
 
   // Step 3 — Target branch
-  const defaultIdx = localBranches.indexOf(defaultTarget);
-  const sorted =
-    defaultIdx >= 0
-      ? [defaultTarget, ...localBranches.filter((b) => b !== defaultTarget)]
-      : localBranches;
-  const target = await p.select({
+  const sorted = sortBranchesDefaultFirst(localBranches, defaultTarget);
+  const target = await p.autocomplete({
     message: "Target branch (base for branching & PRs)",
     options: sorted.map((b) => ({
       value: b,
@@ -1883,6 +1833,7 @@ async function createNewWorktreeFlow(
       hint: b === branchSummary.current ? "current" : undefined,
     })),
     maxItems: sorted.length,
+    placeholder: "Type to search…",
   });
   if (cancelled(target)) bail("Cancelled.");
   const targetBranch = (target as string) || defaultTarget;
@@ -1989,6 +1940,7 @@ async function archiveWorktrees(
   repoRoot: string,
   dataDir: string,
   slug: string,
+  protectedBranches: Set<string>,
 ): Promise<void> {
   const archiveSpinner = p.spinner();
   for (const name of names) {
@@ -2005,6 +1957,12 @@ async function archiveWorktrees(
     try {
       await g.raw("worktree", "prune");
     } catch {}
+
+    if (!protectedBranches.has(entry.branch)) {
+      try {
+        await g.deleteLocalBranch(entry.branch, true);
+      } catch {}
+    }
 
     data.worktrees[name] = {
       ...entry,
@@ -2109,7 +2067,7 @@ async function cleanFlow(flags: CleanFlags): Promise<void> {
 
     for (const [name, entry] of mergedEntries) {
       const pr = prStatuses.get(name);
-      p.note(`${pc.bold(entry.branch)}  ${prBadge(pr ?? null)}`);
+      p.note(`${pc.bold(entry.branch)}  ${prBadge(pr ?? null, pc)}`);
     }
 
     const confirmed = await p.confirm({
@@ -2123,7 +2081,14 @@ async function cleanFlow(flags: CleanFlags): Promise<void> {
     }
 
     const mergedNames = mergedEntries.map(([name]) => name);
-    await archiveWorktrees(mergedNames, data, repoRoot, dataDir, slug);
+    await archiveWorktrees(
+      mergedNames,
+      data,
+      repoRoot,
+      dataDir,
+      slug,
+      protectedBranches,
+    );
     saveWorktrees(dataDir, slug, data);
     p.outro(pc.green(`Archived ${mergedNames.length} worktree(s).`));
     return;
@@ -2143,7 +2108,7 @@ async function cleanFlow(flags: CleanFlags): Promise<void> {
       return {
         value: name,
         label: entry.branch,
-        hint: `${statusBadge(status, STATUS_PAD)} ${prBadge(pr ?? null)}`,
+        hint: `${statusBadge(status, STATUS_PAD, pc)} ${prBadge(pr ?? null, pc)}`,
       };
     }),
     initialValues: mergedNames,
@@ -2170,7 +2135,14 @@ async function cleanFlow(flags: CleanFlags): Promise<void> {
     return;
   }
 
-  await archiveWorktrees(selectedNames, data, repoRoot, dataDir, slug);
+  await archiveWorktrees(
+    selectedNames,
+    data,
+    repoRoot,
+    dataDir,
+    slug,
+    protectedBranches,
+  );
   saveWorktrees(dataDir, slug, data);
   p.outro(pc.green(`Archived ${selectedNames.length} worktree(s).`));
 }
