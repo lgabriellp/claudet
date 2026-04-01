@@ -1211,8 +1211,9 @@ function launchClaude(cwd: string, ctx?: SessionContext): void {
     generateClaudeLocalMd(cwd, ctx);
   }
   const args: string[] = [];
-  if (ctx?.lastSessionId) {
-    args.push("--resume", ctx.lastSessionId);
+  const resuming = !!ctx?.lastSessionId;
+  if (resuming) {
+    args.push("--resume", ctx!.lastSessionId!);
   } else if (ctx?.planPath) {
     if (ctx.status === "pending") {
       args.push("load plan and start planning");
@@ -1241,7 +1242,29 @@ function launchClaude(cwd: string, ctx?: SessionContext): void {
     stdio: "inherit",
     env: process.env,
   });
-  child.on("exit", (code) => process.exit(code ?? 0));
+  child.on("exit", (code) => {
+    if (code && resuming) {
+      console.error(pc.yellow("Session expired, starting fresh…"));
+      const retryArgs = args.filter(
+        (a, i) => a !== "--resume" && !(i > 0 && args[i - 1] === "--resume"),
+      );
+      if (ctx?.planPath) {
+        retryArgs.unshift(
+          ctx.status === "pending"
+            ? "load plan and start planning"
+            : "load plan",
+        );
+      }
+      const retry = spawn("claude", retryArgs, {
+        cwd,
+        stdio: "inherit",
+        env: process.env,
+      });
+      retry.on("exit", (c) => process.exit(c ?? 0));
+    } else {
+      process.exit(code ?? 0);
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
