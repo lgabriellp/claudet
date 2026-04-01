@@ -1744,18 +1744,31 @@ async function createNewWorktreeFlow(
   const defaultTarget =
     projectConfig.defaultTarget || globalConfig.defaultTarget || "dev";
 
-  // Get local branches for target selection
-  let branchSummary = await git(repoRoot).branchLocal();
-  if (branchSummary.all.length === 0) {
+  // Fetch remote refs so the list is up to date
+  await git(repoRoot).fetch(["--prune"]);
+
+  // Get local + remote branches for target selection
+  let branchSummary = await git(repoRoot).branch(["-a"]);
+  if (branchSummary.all.filter((b) => !b.startsWith("remotes/")).length === 0) {
     // Fresh repo with no commits — create initial commit so branches exist
     execFileSync("git", ["commit", "--allow-empty", "-m", "Initial commit"], {
       cwd: repoRoot,
       stdio: "ignore",
     });
-    branchSummary = await git(repoRoot).branchLocal();
+    branchSummary = await git(repoRoot).branch(["-a"]);
     p.log.info(`Created initial commit on ${branchSummary.current || "main"}`);
   }
-  const localBranches = branchSummary.all;
+
+  const localBranches = branchSummary.all.filter(
+    (b) => !b.startsWith("remotes/"),
+  );
+  const localSet = new Set(localBranches);
+  const remoteBranches = branchSummary.all
+    .filter((b) => b.startsWith("remotes/origin/") && !b.includes("/HEAD"))
+    .map((b) => b.replace("remotes/origin/", ""))
+    .filter((b) => !localSet.has(b));
+  const combinedBranches = [...localBranches, ...remoteBranches];
+  const remoteSet = new Set(remoteBranches);
 
   // Step 1 — choose naming method
   const method = await p.select({
@@ -1825,13 +1838,18 @@ async function createNewWorktreeFlow(
   }
 
   // Step 3 — Target branch
-  const sorted = sortBranchesDefaultFirst(localBranches, defaultTarget);
+  const sorted = sortBranchesDefaultFirst(combinedBranches, defaultTarget);
   const target = await p.autocomplete({
     message: "Target branch (base for branching & PRs)",
     options: sorted.map((b) => ({
       value: b,
       label: b,
-      hint: b === branchSummary.current ? "current" : undefined,
+      hint:
+        b === branchSummary.current
+          ? "current"
+          : remoteSet.has(b)
+            ? "remote"
+            : undefined,
     })),
     maxItems: sorted.length,
     placeholder: "Type to search…",
