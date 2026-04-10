@@ -62,6 +62,7 @@ import {
   matchesSearch,
   sortBranchesDefaultFirst,
   parseCleanFlags,
+  writeWorktreeSandboxSettings,
   type CleanFlags,
   type CreateFlags,
   type HookDefinition,
@@ -92,6 +93,28 @@ if (!HOME) {
   process.exit(1);
 }
 const GLOBAL_SETTINGS_FILE = resolve(HOME, ".claude", "settings.json");
+
+const SANDBOX_DOMAIN_CATEGORIES: Record<string, readonly string[]> = {
+  "Package registries": [
+    "registry.npmjs.org",
+    "registry.yarnpkg.com",
+    "pypi.org",
+    "files.pythonhosted.org",
+  ],
+  "Git hosts": [
+    "github.com",
+    "api.github.com",
+    "raw.githubusercontent.com",
+    "gitlab.com",
+    "bitbucket.org",
+  ],
+  "Anthropic / Claude docs": [
+    "api.anthropic.com",
+    "code.claude.com",
+    "docs.anthropic.com",
+  ],
+  "Common CDNs": ["jsdelivr.net", "unpkg.com", "cdnjs.cloudflare.com"],
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -126,6 +149,10 @@ interface ProjectConfig {
   defaultTarget?: string;
   setup?: string[];
   protectedBranches?: string[];
+  sandbox?: {
+    allowedDomains: string[];
+    extraAllowWrite?: string[];
+  };
 }
 
 interface GlobalConfig {
@@ -1204,12 +1231,79 @@ function generateClaudeLocalMd(wtPath: string, ctx: SessionContext): void {
   writeFileSync(resolve(claudeDir, "CLAUDE.local.md"), content);
 }
 
-function launchClaude(cwd: string, ctx?: SessionContext): void {
+async function promptSandboxDomains(
+  existing: string[] = [],
+): Promise<string[]> {
+  const existingSet = new Set(existing);
+  const labels = Object.keys(SANDBOX_DOMAIN_CATEGORIES);
+  // Pre-select every category that is either already fully present in the
+  // existing list, or that the user has no settings for yet (first run).
+  const preselected = labels.filter((label) => {
+    const domains = SANDBOX_DOMAIN_CATEGORIES[label]!;
+    if (existing.length === 0) return true;
+    return domains.every((d) => existingSet.has(d));
+  });
+
+  const selection = await p.multiselect({
+    message: "Select domain categories to allow in the Claude Code sandbox",
+    options: labels.map((label) => ({
+      value: label,
+      label,
+      hint: SANDBOX_DOMAIN_CATEGORIES[label]!.join(", "),
+    })),
+    initialValues: preselected,
+    required: false,
+  });
+  if (cancelled(selection)) bail("Cancelled.");
+
+  const picked = selection as string[];
+  const domains = new Set<string>();
+  for (const label of picked) {
+    for (const d of SANDBOX_DOMAIN_CATEGORIES[label] ?? []) {
+      domains.add(d);
+    }
+  }
+  return Array.from(domains).sort();
+}
+
+async function ensureSandboxDomains(
+  dataDir: string,
+  slug: string,
+): Promise<ProjectConfig> {
+  const cfg = loadProjectConfig(dataDir, slug);
+  if (cfg.sandbox?.allowedDomains) return cfg;
+  const allowedDomains = await promptSandboxDomains();
+  const next: ProjectConfig = {
+    ...cfg,
+    sandbox: { ...(cfg.sandbox ?? {}), allowedDomains },
+  };
+  saveProjectConfig(dataDir, slug, next);
+  const categoryCount = Object.keys(SANDBOX_DOMAIN_CATEGORIES).filter((k) =>
+    SANDBOX_DOMAIN_CATEGORIES[k]!.every((d) => allowedDomains.includes(d)),
+  ).length;
+  p.note(
+    `${allowedDomains.length} domain(s) across ${categoryCount} categor${
+      categoryCount === 1 ? "y" : "ies"
+    }`,
+    "Sandbox domains saved",
+  );
+  return next;
+}
+
+function launchClaude(
+  cwd: string,
+  projectConfig: ProjectConfig,
+  ctx?: SessionContext,
+): void {
   p.outro(pc.dim(`Launching claude in ${cwd}`));
   if (ctx) {
     updatePlanSessionContext(ctx);
     generateClaudeLocalMd(cwd, ctx);
   }
+  // Refresh sandbox settings on every launch so repo-level changes to
+  // allowedDomains propagate to all worktrees without manual sync.
+  writeWorktreeSandboxSettings(cwd, projectConfig.sandbox);
+
   const args: string[] = [];
   const resuming = !!ctx?.lastSessionId;
   if (resuming) {
@@ -1221,19 +1315,6 @@ function launchClaude(cwd: string, ctx?: SessionContext): void {
       args.push("load plan");
     }
   }
-  args.push(
-    "--allowedTools",
-    "Read",
-    "Glob",
-    "Grep",
-    "Bash(git log:*)",
-    "Bash(git diff:*)",
-    "Bash(git status:*)",
-    "Bash(git branch:*)",
-    "Bash(git show:*)",
-    "WebFetch",
-    "WebSearch",
-  );
   // Allow reading all sibling worktrees (cwd is <dataDir>/repos/<slug>/worktrees/<name>)
   const worktreesRoot = dirname(cwd);
   args.push("--add-dir", worktreesRoot);
@@ -1369,6 +1450,8 @@ async function createWorktree(
   // Post-creation setup: symlinks, setup commands, plan, metadata.
   // Wrapped in try-catch to clean up on failure — prevents orphaned worktrees.
   try {
+    const projectConfig = loadProjectConfig(dataDir, slug);
+
     // Symlink .claude/settings.local.json
     const localSettings = resolve(repoRoot, ".claude", "settings.local.json");
     if (existsSync(localSettings)) {
@@ -1379,6 +1462,9 @@ async function createWorktree(
         symlinkSync(localSettings, destPath);
       }
     }
+
+    // Write sandbox settings into the worktree (materializes any symlink).
+    writeWorktreeSandboxSettings(wtPath, projectConfig.sandbox);
 
     // Symlink .env* files
     const envFiles = readdirSync(repoRoot).filter(
@@ -1398,7 +1484,6 @@ async function createWorktree(
 
     // Run setup commands from project config (failures are non-fatal)
     if (!skipSetup) {
-      const projectConfig = loadProjectConfig(dataDir, slug);
       const setupCommands = projectConfig.setup ?? [];
       for (const cmd of setupCommands) {
         try {
@@ -1558,6 +1643,7 @@ async function promptAndRegisterRepo(
     if (selected !== MANUAL) {
       const root = selected as string;
       const slug = registerRepo(dataDir, root);
+      await ensureSandboxDomains(dataDir, slug);
       return { slug, repoRoot: root };
     }
   }
@@ -1593,6 +1679,7 @@ async function promptManualRepoPath(
   }
 
   const slug = registerRepo(dataDir, root);
+  await ensureSandboxDomains(dataDir, slug);
   return { slug, repoRoot: root };
 }
 
@@ -1613,7 +1700,9 @@ async function interactiveFlow(): Promise<void> {
 
   const { slug, repoRoot } = await pickRepo(dataDir);
 
-  const projectConfig = loadProjectConfig(dataDir, slug);
+  // Backfill sandbox domains for repos registered before this feature
+  // existed, and ensure the config is current for the sandbox refresh.
+  const projectConfig = await ensureSandboxDomains(dataDir, slug);
   const globalCfg = loadGlobalConfig();
   const defaultTarget =
     projectConfig.defaultTarget || globalCfg.defaultTarget || "dev";
@@ -1741,7 +1830,7 @@ async function interactiveFlow(): Promise<void> {
   p.note(infoLines.join("\n"), selectedName);
 
   touchLastAccessed(dataDir, slug, selectedName);
-  launchClaude(selectedWtPath, {
+  launchClaude(selectedWtPath, projectConfig, {
     planPath: pPath,
     branch: entry.branch,
     target: entry.target,
@@ -1762,7 +1851,7 @@ async function createNewWorktreeFlow(
   slug: string,
   repoRoot: string,
 ): Promise<void> {
-  const projectConfig = loadProjectConfig(dataDir, slug);
+  const projectConfig = await ensureSandboxDomains(dataDir, slug);
   const globalConfig = loadGlobalConfig();
   const defaultTarget =
     projectConfig.defaultTarget || globalConfig.defaultTarget || "dev";
@@ -1893,7 +1982,7 @@ async function createNewWorktreeFlow(
   );
 
   touchLastAccessed(dataDir, slug, shortName);
-  launchClaude(wtPath, {
+  launchClaude(wtPath, projectConfig, {
     planPath,
     branch,
     target: targetBranch,

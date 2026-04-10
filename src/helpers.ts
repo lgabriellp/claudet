@@ -362,11 +362,126 @@ export function prNeedsAttention(
 // Path derivation
 // ---------------------------------------------------------------------------
 
-import { existsSync, readdirSync, statSync, unlinkSync } from "fs";
+import {
+  appendFileSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
+import { execFileSync } from "child_process";
 import { basename, dirname, join, resolve } from "path";
 
 export function deriveRepoSlug(repoRoot: string): string {
   return `${basename(dirname(repoRoot))}--${basename(repoRoot)}`;
+}
+
+// ---------------------------------------------------------------------------
+// Sandbox settings
+// ---------------------------------------------------------------------------
+
+export interface SandboxConfig {
+  allowedDomains: string[];
+  extraAllowWrite?: string[];
+}
+
+/**
+ * Writes `.claude/settings.local.json` inside a worktree with the Claude Code
+ * sandbox enabled and `permissions.defaultMode: "bypassPermissions"`. If the
+ * destination is a symlink (e.g. into the source repo), the link is
+ * materialized first so the source repo is never mutated. Existing unrelated
+ * keys (hooks, mcpServers, …) are preserved.
+ *
+ * Also appends `.claude/settings.local.json` to the git common dir's
+ * `info/exclude` so git never shows it as modified.
+ */
+export function writeWorktreeSandboxSettings(
+  wtPath: string,
+  sandbox: SandboxConfig | undefined,
+): void {
+  const claudeDir = resolve(wtPath, ".claude");
+  const destPath = resolve(claudeDir, "settings.local.json");
+  if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
+
+  let existing: Record<string, unknown> = {};
+  if (existsSync(destPath)) {
+    const isSymlink = (() => {
+      try {
+        return lstatSync(destPath).isSymbolicLink();
+      } catch {
+        return false;
+      }
+    })();
+    try {
+      // readFileSync follows symlinks, so this reads the original target.
+      existing = tryParseJson<Record<string, unknown>>(
+        readFileSync(destPath, "utf-8"),
+        {},
+      );
+    } catch {
+      existing = {};
+    }
+    if (isSymlink) {
+      // Materialize: break the symlink so our writes don't propagate back to
+      // the source repo.
+      unlinkSync(destPath);
+    }
+  }
+
+  const allowedDomains = sandbox?.allowedDomains ?? [];
+  const extraAllowWrite = sandbox?.extraAllowWrite ?? [];
+  const worktreesRoot = dirname(wtPath);
+
+  const merged: Record<string, unknown> = {
+    ...existing,
+    sandbox: {
+      enabled: true,
+      filesystem: {
+        allowWrite: [wtPath, worktreesRoot, ...extraAllowWrite],
+      },
+      network: { allowedDomains },
+      failIfUnavailable: false,
+    },
+    permissions: {
+      ...((existing.permissions as Record<string, unknown> | undefined) ?? {}),
+      defaultMode: "bypassPermissions",
+    },
+  };
+
+  writeFileSync(destPath, JSON.stringify(merged, null, 2) + "\n");
+
+  // Use the common git dir so the exclude entry is shared across worktrees.
+  try {
+    const gitCommonDir = execFileSync(
+      "git",
+      ["rev-parse", "--git-common-dir"],
+      { cwd: wtPath, encoding: "utf-8" },
+    ).trim();
+    const excludeDir = resolve(
+      gitCommonDir.startsWith("/")
+        ? gitCommonDir
+        : resolve(wtPath, gitCommonDir),
+      "info",
+    );
+    if (existsSync(excludeDir)) {
+      const excludeFile = resolve(excludeDir, "exclude");
+      const entry = ".claude/settings.local.json";
+      const current = existsSync(excludeFile)
+        ? readFileSync(excludeFile, "utf-8")
+        : "";
+      if (!current.split("\n").some((line) => line.trim() === entry)) {
+        const sep = current.length === 0 || current.endsWith("\n") ? "" : "\n";
+        appendFileSync(excludeFile, `${sep}${entry}\n`);
+      }
+    }
+  } catch {
+    // Non-fatal: if we can't write to info/exclude the settings file still
+    // works — it'll just show up as untracked in `git status`.
+  }
 }
 
 // ---------------------------------------------------------------------------

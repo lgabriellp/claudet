@@ -1,9 +1,12 @@
 import { describe, expect, it, beforeAll, beforeEach, afterEach } from "vitest";
-import { execSync } from "child_process";
+import { execFileSync, execSync } from "child_process";
 import {
+  existsSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
   utimesSync,
   chmodSync,
@@ -18,6 +21,7 @@ import {
   managedSectionReplace,
   managedSectionExtract,
   toMergeableStatus,
+  writeWorktreeSandboxSettings,
   deriveRepoSlug,
   deriveShortName,
   composeBranchFromTask,
@@ -2069,5 +2073,140 @@ describe("sortBranchesDefaultFirst", () => {
     const result = sortBranchesDefaultFirst(["main", "dev", "feat"], "main");
     expect(result.filter((b) => b === "main")).toHaveLength(1);
     expect(result).toEqual(["main", "dev", "feat"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// writeWorktreeSandboxSettings
+// ---------------------------------------------------------------------------
+
+describe("writeWorktreeSandboxSettings", () => {
+  let workRoot: string;
+  let wtPath: string;
+
+  beforeEach(() => {
+    workRoot = mkdtempSync(join(tmpdir(), "claudet-sandbox-"));
+    // Mimic the claudet layout: <root>/worktrees/<name>
+    const worktreesRoot = join(workRoot, "worktrees");
+    wtPath = join(worktreesRoot, "feature");
+    mkdirSync(wtPath, { recursive: true });
+    // Initialize a git repo so execFileSync("git rev-parse …") works.
+    execFileSync("git", ["init", "-q"], { cwd: wtPath });
+  });
+
+  afterEach(() => {
+    rmSync(workRoot, { recursive: true, force: true });
+  });
+
+  it("writes sandbox + bypassPermissions into settings.local.json", () => {
+    writeWorktreeSandboxSettings(wtPath, {
+      allowedDomains: ["example.com", "github.com"],
+    });
+
+    const destPath = join(wtPath, ".claude", "settings.local.json");
+    expect(existsSync(destPath)).toBe(true);
+    const parsed = JSON.parse(readFileSync(destPath, "utf-8"));
+
+    expect(parsed.sandbox.enabled).toBe(true);
+    expect(parsed.sandbox.network.allowedDomains).toEqual([
+      "example.com",
+      "github.com",
+    ]);
+    expect(parsed.sandbox.filesystem.allowWrite).toContain(wtPath);
+    expect(parsed.sandbox.filesystem.allowWrite).toContain(
+      join(workRoot, "worktrees"),
+    );
+    expect(parsed.sandbox.failIfUnavailable).toBe(false);
+    expect(parsed.permissions.defaultMode).toBe("bypassPermissions");
+  });
+
+  it("preserves unrelated keys from an existing settings.local.json", () => {
+    const claudeDir = join(wtPath, ".claude");
+    mkdirSync(claudeDir, { recursive: true });
+    const destPath = join(claudeDir, "settings.local.json");
+    writeFileSync(
+      destPath,
+      JSON.stringify(
+        {
+          hooks: { PreToolUse: [{ type: "command", command: "echo hi" }] },
+          mcpServers: { foo: { command: "bar" } },
+          permissions: { allow: ["Bash(ls:*)"] },
+        },
+        null,
+        2,
+      ),
+    );
+
+    writeWorktreeSandboxSettings(wtPath, {
+      allowedDomains: ["example.com"],
+    });
+
+    const parsed = JSON.parse(readFileSync(destPath, "utf-8"));
+    // Unrelated top-level keys preserved.
+    expect(parsed.hooks).toBeDefined();
+    expect(parsed.hooks.PreToolUse).toHaveLength(1);
+    expect(parsed.mcpServers.foo.command).toBe("bar");
+    // Existing permissions keys preserved, defaultMode added on top.
+    expect(parsed.permissions.allow).toEqual(["Bash(ls:*)"]);
+    expect(parsed.permissions.defaultMode).toBe("bypassPermissions");
+    // Sandbox applied.
+    expect(parsed.sandbox.enabled).toBe(true);
+  });
+
+  it("materializes a symlinked settings.local.json without mutating the source", () => {
+    // Simulate claudet's existing symlink flow: a source file in a
+    // sibling "repo" directory, linked from the worktree.
+    const repoRoot = join(workRoot, "repo");
+    const sourceClaude = join(repoRoot, ".claude");
+    mkdirSync(sourceClaude, { recursive: true });
+    const sourcePath = join(sourceClaude, "settings.local.json");
+    const sourceContent = JSON.stringify(
+      { hooks: { original: true } },
+      null,
+      2,
+    );
+    writeFileSync(sourcePath, sourceContent);
+
+    const wtClaude = join(wtPath, ".claude");
+    mkdirSync(wtClaude, { recursive: true });
+    const destPath = join(wtClaude, "settings.local.json");
+    symlinkSync(sourcePath, destPath);
+
+    writeWorktreeSandboxSettings(wtPath, {
+      allowedDomains: ["example.com"],
+    });
+
+    // Source must be untouched.
+    expect(readFileSync(sourcePath, "utf-8")).toBe(sourceContent);
+
+    // Dest is now a regular file with merged content.
+    const parsed = JSON.parse(readFileSync(destPath, "utf-8"));
+    expect(parsed.hooks).toEqual({ original: true });
+    expect(parsed.sandbox.enabled).toBe(true);
+    expect(parsed.sandbox.network.allowedDomains).toEqual(["example.com"]);
+  });
+
+  it("appends .claude/settings.local.json to git info/exclude", () => {
+    writeWorktreeSandboxSettings(wtPath, { allowedDomains: [] });
+
+    const gitDir = execFileSync("git", ["rev-parse", "--git-common-dir"], {
+      cwd: wtPath,
+      encoding: "utf-8",
+    }).trim();
+    const excludePath = join(
+      gitDir.startsWith("/") ? gitDir : join(wtPath, gitDir),
+      "info",
+      "exclude",
+    );
+    const content = readFileSync(excludePath, "utf-8");
+    expect(content).toContain(".claude/settings.local.json");
+
+    // Calling again must not duplicate the entry.
+    writeWorktreeSandboxSettings(wtPath, { allowedDomains: [] });
+    const after = readFileSync(excludePath, "utf-8");
+    const matches = after
+      .split("\n")
+      .filter((l) => l.trim() === ".claude/settings.local.json");
+    expect(matches).toHaveLength(1);
   });
 });
