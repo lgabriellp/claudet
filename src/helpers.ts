@@ -396,13 +396,13 @@ export const GlobalConfigSchema = z.object({
   highPriorityTarget: z.string(),
   defaultTarget: z.string(),
   protectedBranches: z.array(z.string()),
-  setup: z.array(z.string()),
+  setup: z.array(z.string()).default([]),
   sandbox: SandboxConfigSchema,
 });
 
 export const ProjectConfigSchema = z.object({
   defaultTarget: z.string(),
-  setup: z.array(z.string()),
+  setup: z.array(z.string()).default([]),
   protectedBranches: z.array(z.string()),
   sandbox: SandboxConfigSchema,
 });

@@ -1361,12 +1361,6 @@ async function ensureGlobalConfig(): Promise<GlobalConfig> {
       "main, dev, prod",
     );
   }
-  if (missing.has("setup")) {
-    cfg.setup = await promptStringList(
-      "Default setup commands (comma-separated, or empty)",
-      "",
-    );
-  }
   if (missing.has("sandbox")) {
     cfg.sandbox = await promptSandboxConfig();
   }
@@ -1399,13 +1393,6 @@ async function ensureProjectConfig(
       "Protected branches for this repo (comma-separated)",
       "main, dev, prod",
       globalCfg.protectedBranches,
-    );
-  }
-  if (missing.has("setup")) {
-    cfg.setup = await promptStringList(
-      "Setup commands for this repo (comma-separated, or empty)",
-      "",
-      globalCfg.setup,
     );
   }
   if (missing.has("sandbox")) {
@@ -2641,11 +2628,6 @@ async function runInitSetup(): Promise<void> {
     "main, dev, prod",
     existingArr("protectedBranches"),
   );
-  const setup = await promptStringList(
-    "Default setup commands (comma-separated, or empty)",
-    "",
-    existingArr("setup"),
-  );
   const sandbox = await promptSandboxConfig(
     existingSandbox?.enabled !== undefined
       ? {
@@ -2661,7 +2643,6 @@ async function runInitSetup(): Promise<void> {
     highPriorityTarget,
     defaultTarget,
     protectedBranches,
-    setup,
     sandbox,
   };
   if (dataDir !== "~/.claudet") {
@@ -2677,7 +2658,6 @@ async function runInitSetup(): Promise<void> {
       `${pc.dim("High priority")}   ${highPriorityTarget}`,
       `${pc.dim("Default target")}  ${defaultTarget}`,
       `${pc.dim("Protected")}       ${protectedBranches.join(", ")}`,
-      `${pc.dim("Setup")}           ${setup.length ? setup.join(", ") : "(none)"}`,
       `${pc.dim("Sandbox")}         ${sandbox.enabled ? "enabled" : "disabled"}`,
       `${pc.dim("Config")}          ${GLOBAL_CONFIG_PATH}`,
     ].join("\n"),
