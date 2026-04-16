@@ -730,7 +730,7 @@ function sessionStatePath(sessionId: string): string {
 }
 
 function pidFilePath(wtPath: string): string {
-  return resolve(wtPath, ".claude", "claudet.pid");
+  return resolve(wtPath, ".claude", "rules", "claudet", "claudet.pid");
 }
 
 function isWorktreeRunning(wtPath: string): boolean {
@@ -1234,21 +1234,51 @@ function updatePlanSessionContext(ctx: SessionContext): void {
   writeFileSync(ctx.planPath, content);
 }
 
-function generateClaudeLocalMd(wtPath: string, ctx: SessionContext): void {
-  const claudeDir = resolve(wtPath, ".claude");
-  if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
-  const template = readFileSync(
-    resolve(TEMPLATES_DIR, "claude-local-md.md"),
-    "utf-8",
-  );
-  let content = template
-    .replace(/\{\{planPath\}\}/g, ctx.planPath)
-    .replace(/\{\{branch\}\}/g, ctx.branch)
-    .replace(/\{\{target\}\}/g, ctx.target);
-  if (ctx.behindRemote && ctx.behindRemote > 0) {
-    content += `\n### Remote Changes\n\n**⚠ Branch \`${ctx.branch}\` is ${ctx.behindRemote} commit(s) behind \`origin/${ctx.branch}\`.** Run \`git pull\` before making changes.\n`;
+async function ensureClaudetGitignore(repoRoot: string): Promise<void> {
+  const gitignorePath = resolve(repoRoot, ".gitignore");
+  const entry = ".claude/rules/claudet/";
+  const current = existsSync(gitignorePath)
+    ? readFileSync(gitignorePath, "utf-8")
+    : "";
+  if (current.split("\n").some((line) => line.trim() === entry)) return;
+
+  const confirm = await p.confirm({
+    message: `Add ${entry} to .gitignore?`,
+    initialValue: true,
+  });
+  if (cancelled(confirm) || !confirm) return;
+
+  const sep = current.length === 0 || current.endsWith("\n") ? "" : "\n";
+  appendFileSync(gitignorePath, `${sep}${entry}\n`);
+}
+
+function writeClaudetRules(wtPath: string, ctx: SessionContext): void {
+  const rulesDir = resolve(wtPath, ".claude", "rules", "claudet");
+  mkdirSync(rulesDir, { recursive: true });
+
+  // Copy plan file into rules directory.
+  // If the branch follows <tracking_system>/<task_id>, store as
+  // .claude/rules/claudet/<tracking_system>/<task_id>.md
+  if (ctx.planPath && existsSync(ctx.planPath)) {
+    const parts = ctx.branch.split("/");
+    let planDest: string;
+    if (parts.length === 2) {
+      const subDir = resolve(rulesDir, parts[0]);
+      mkdirSync(subDir, { recursive: true });
+      planDest = resolve(subDir, `${parts[1]}.md`);
+    } else {
+      planDest = resolve(rulesDir, "plan.md");
+    }
+    writeFileSync(planDest, readFileSync(ctx.planPath, "utf-8"));
   }
-  writeFileSync(resolve(claudeDir, "CLAUDE.local.md"), content);
+
+  // Copy planning guide and worktree workflow from ~/.claudet/ (canonical source)
+  for (const name of ["planning-guide.md", "worktree-workflow.md"]) {
+    const source = resolve(CLAUDET_DIR, name);
+    if (existsSync(source)) {
+      writeFileSync(resolve(rulesDir, name), readFileSync(source, "utf-8"));
+    }
+  }
 }
 
 async function promptSandboxDomains(
@@ -1438,7 +1468,7 @@ function launchClaude(
   p.outro(pc.dim(`Launching claude in ${cwd}`));
   if (ctx) {
     updatePlanSessionContext(ctx);
-    generateClaudeLocalMd(cwd, ctx);
+    writeClaudetRules(cwd, ctx);
   }
   // Refresh sandbox settings on every launch so repo-level changes to
   // allowedDomains propagate to all worktrees without manual sync.
@@ -1449,11 +1479,11 @@ function launchClaude(
   if (resuming) {
     args.push("--resume", ctx!.lastSessionId!);
   } else if (ctx?.planPath) {
-    if (ctx.status === "pending") {
-      args.push("load plan and start planning");
-    } else {
-      args.push("load plan");
-    }
+    args.push(
+      ctx.status === "pending"
+        ? "start planning"
+        : "continue from last progress entry",
+    );
   }
   // Allow reading all sibling worktrees (cwd is <dataDir>/repos/<slug>/worktrees/<name>)
   const worktreesRoot = dirname(cwd);
@@ -2007,6 +2037,7 @@ async function interactiveFlow(): Promise<void> {
     if (cancelled(proceed) || !proceed) bail("Cancelled.");
   }
 
+  await ensureClaudetGitignore(repoRoot);
   touchLastAccessed(dataDir, slug, selectedName);
   launchClaude(selectedWtPath, projectConfig, {
     planPath: pPath,
@@ -2565,7 +2596,7 @@ function installCommand(): void {
     }
   }
 
-  // 2. Remove legacy .claude/rules/session.md from all worktrees
+  // 2. Remove legacy files from all worktrees
   const dataDir = resolveDataDir();
   const slugs = loadRepoSlugs(dataDir);
   for (const slug of slugs) {
@@ -2573,26 +2604,33 @@ function installCommand(): void {
     if (!existsSync(wtBase)) continue;
     try {
       for (const name of readdirSync(wtBase)) {
-        const sessionFile = resolve(
-          wtBase,
-          name,
-          ".claude",
-          "rules",
-          "session.md",
-        );
+        const wtClaude = resolve(wtBase, name, ".claude");
+
+        // Remove legacy .claude/rules/session.md
+        const sessionFile = resolve(wtClaude, "rules", "session.md");
         if (existsSync(sessionFile)) {
           unlinkSync(sessionFile);
-          // rmdir .claude/rules if empty
-          const rulesDir = dirname(sessionFile);
-          try {
-            if (readdirSync(rulesDir).length === 0) rmdirSync(rulesDir);
-          } catch {}
-          // rmdir .claude if empty
-          const claudeDir = dirname(rulesDir);
-          try {
-            if (readdirSync(claudeDir).length === 0) rmdirSync(claudeDir);
-          } catch {}
           actions.push(`removed ${slug}/${name}/.claude/rules/session.md`);
+        }
+
+        // Remove legacy .claude/CLAUDE.local.md (claudet-generated, not symlinked)
+        const localMd = resolve(wtClaude, "CLAUDE.local.md");
+        if (existsSync(localMd)) {
+          try {
+            const isSymlink = lstatSync(localMd).isSymbolicLink();
+            if (!isSymlink) {
+              unlinkSync(localMd);
+              actions.push(`removed ${slug}/${name}/.claude/CLAUDE.local.md`);
+            }
+          } catch {}
+        }
+
+        // Remove legacy .claude/claudet.pid (old location)
+        const oldPid = resolve(wtClaude, "claudet.pid");
+        if (existsSync(oldPid)) {
+          try {
+            unlinkSync(oldPid);
+          } catch {}
         }
       }
     } catch {

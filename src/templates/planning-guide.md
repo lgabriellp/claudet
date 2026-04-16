@@ -2,36 +2,49 @@
 
 General-purpose planning methodology for structured Claude sessions.
 
+## Plan File Location
+
+Plan files are stored based on the branch name. If the branch follows the pattern `<tracking_system>/<task_id>` (e.g., `CU/abc123`, `JIRA/PROJ-456`, `LIN/issue-789`), the plan is stored at:
+
+```
+.claude/rules/claudet/<tracking_system>/<task_id>.md
+```
+
+This keeps plans organized by tracking system and task, and auto-loaded by Claude Code's rules system.
+
 ## Plan File Template
 
-Every plan file must include these sections:
+Every plan file must include these sections in this order:
 
 ```markdown
 # <Plan Title>
 
 ## Context
 
-Why this change is needed — the problem or opportunity.
+Why this change is needed — the problem or opportunity that prompted it.
 
 ## Objective
 
-What will be done — deliverables and scope.
+A concise statement of what will be done. Keep it clear and to the point — one or two sentences. Details, trade-offs, and choices belong in Decisions.
 
-## ClickUp Ticket
+## Decisions
 
-Link or ID (if applicable).
+Indexed list of all decisions made during planning. Each decision captures a choice, its rationale, and any constraints. New decisions are appended as they arise.
 
-## Target Branch
-
-Base branch for the PR (e.g., `dev`, `main`).
-
-## Key Files
-
-Files to be created or modified.
+1. **<Decision title>** — <What was decided and why>
+2. **<Decision title>** — <What was decided and why>
 
 ## Test Scenarios
 
-Grouped by tier when testable (see Test Scenario Format below).
+Each scenario must reference a decision (by number) or the objective. Use the AAA pattern (Arrange, Act, Assert).
+
+## Manual Tests
+
+Steps to verify the changes manually. Each test must reference a decision or the objective.
+
+## Implementation
+
+Key files, approach, and step-by-step plan for the changes.
 
 ## Verification
 
@@ -49,10 +62,90 @@ Append-only log of work done each session.
 ### Required Fields
 
 - **Context** and **Objective** are always required — they frame the "why" and "what"
-- **Target Branch** and **Key Files** are required before implementation begins
+- **Decisions** is required — even if only one decision, it must be recorded
+- **Test Scenarios** are required for any plan that involves testable code — each must reference a decision or the objective
+- **Manual Tests** are required — steps to verify changes by hand
+- **Implementation** is required before coding begins — key files, approach, steps
+- **Verification** is required — how to confirm everything works end-to-end
 - **Status** and **Progress** are required for session continuity
-- **Verification** is required — every plan must describe how to confirm it works
-- **Test Scenarios** are required for any plan that involves testable code
+
+### Coherence Check
+
+Before proceeding with implementation, review Context, Objective, Decisions, and the project's `DECISIONS.md` (if it exists) for incoherences. If any of the following are true, **ask the user for clarification before continuing**:
+
+- A decision contradicts the objective or context
+- A decision contradicts an existing ADR in `DECISIONS.md`
+- The objective is vague or contains implementation details that belong in Decisions
+- Decisions reference constraints or requirements not mentioned in Context
+- Two decisions conflict with each other
+- A test scenario doesn't trace back to a decision or the objective
+
+## Scope Discipline
+
+Each worktree is scoped to one task. Follow these principles:
+
+- **One task per worktree.** If the user asks you to work on something unrelated to the current plan's Context and Objective, suggest creating a new worktree instead of mixing concerns.
+- **Minimize conflicts.** Avoid touching files that aren't necessary for the task. Fewer changed files means fewer merge conflicts.
+- **Minimize changed files.** Prefer targeted edits over broad refactors. Only modify what the plan requires.
+- **Quality gates must pass.** If the project has a quality command (e.g., `pnpm quality`), run it before considering implementation complete. Fix any failures before moving on.
+- **New requirements update the plan.** If new requirements emerge during implementation or after completion, update the Decisions section in the plan file before acting on them. The plan is the source of truth — code follows the plan, not the other way around.
+
+## Completion Protocol
+
+When implementation and verification are both complete (all tests pass, manual tests verified, verification steps confirmed, quality gates green), prompt the user:
+
+> "Implementation and verification are complete. Ready to commit, push, and create a PR?"
+
+If a PR already exists for this branch, suggest adding a comment instead of creating a new one.
+
+## Objective Guidelines
+
+The Objective should answer "what will be done" in one or two sentences:
+
+- **Good:** "Add per-worktree Claude Code sandbox configuration"
+- **Bad:** "Add sandbox config using Seatbelt on macOS with bypassPermissions mode, writing to settings.local.json, with domain categories for npm/github/anthropic/cdn"
+
+The bad example contains decisions (Seatbelt, bypassPermissions, domain categories) that belong in the Decisions section.
+
+## Decisions Guidelines
+
+Decisions are an indexed, append-only list. Each entry records:
+
+- **What** was decided
+- **Why** — the rationale or constraint that drove the choice
+- A decision can be amended by adding a new entry that supersedes it (reference the original by number)
+
+```markdown
+## Decisions
+
+1. **Use Seatbelt sandbox on macOS** — OS-level guardrails allow bypassPermissions mode with near-zero prompts
+2. **Per-worktree settings.local.json** — isolates sandbox config from global settings and source repo
+3. **All 4 domain categories enabled by default** — package registries, git hosts, Anthropic docs, CDNs cover typical dev workflows
+4. **Amends #3: Make sandbox opt-in per repo** — some repos don't want sandbox; prompt at registration
+```
+
+## Test Scenario Format
+
+Use the AAA pattern (Arrange, Act, Assert) with numbered scenarios. Each scenario must reference a decision or the objective in parentheses:
+
+```
+Test 1: "sandbox settings written to worktree" (Decision 1, 2)
+  Arrange: Create a worktree with sandbox enabled
+  Act: Call writeWorktreeSandboxSettings
+  Assert: .claude/settings.local.json contains sandbox.enabled: true, bypassPermissions
+
+Test 2: "sandbox disabled skips settings write" (Decision 4)
+  Arrange: Create a worktree with sandbox.enabled: false
+  Act: Call writeWorktreeSandboxSettings
+  Assert: No .claude/settings.local.json created
+```
+
+### Rules
+
+- Plain English steps with selectors and expected values
+- Every scenario must trace to a decision number or "Objective"
+- Scenarios are preserved as doc comments above the test functions they describe
+- Group scenarios by tier (unit, integration, e2e) when the plan spans multiple tiers
 
 ## ADR-First Workflow
 
@@ -83,29 +176,6 @@ When a plan introduces or changes an architectural decision:
 - Defining a new pattern that other code must follow
 - Changing how layers communicate (API contracts, state shape, data flow)
 - Introducing a new dependency or removing an existing one
-
-## Test Scenario Format
-
-Use the AAA pattern (Arrange, Act, Assert) with numbered scenarios:
-
-```
-Test 1: "user can submit the form with valid data"
-  Arrange: Navigate to /form, fill in name="John", email="john@test.com"
-  Act: Click submit button [data-testid="submit-btn"]
-  Assert: Success toast appears, form resets to empty state
-
-Test 2: "validation errors show for empty required fields"
-  Arrange: Navigate to /form, leave all fields empty
-  Act: Click submit button [data-testid="submit-btn"]
-  Assert: Error messages appear below name and email fields
-```
-
-### Rules
-
-- Plain English steps with selectors and expected values
-- No helper function calls in scenarios — helpers are listed separately
-- Scenarios are preserved as doc comments above the test functions they describe
-- Group scenarios by tier (unit, integration, e2e) when the plan spans multiple tiers
 
 ## PR Body Structure
 
@@ -141,25 +211,6 @@ Doc comments from each new or updated test — the scenario descriptions.
 - Context & Objective come directly from the plan — no rewriting
 - Changes section is a summary, not a changelog — focus on what a reviewer needs to know
 - Test Results table helps reviewers assess coverage impact at a glance
-
-## Documentation Layering Convention
-
-Suggested `.claude/` structure for any project:
-
-| File              | Purpose                                                           |
-| ----------------- | ----------------------------------------------------------------- |
-| `CLAUDE.md`       | Main instructions, quick reference                                |
-| `ARCHITECTURE.md` | System architecture, entity relationships, layer responsibilities |
-| `PATTERNS.md`     | Code patterns cookbook (API, component, hook, state examples)     |
-| `DECISIONS.md`    | Architecture Decision Records (ADRs)                              |
-| `rules/*.md`      | Domain-specific conventions (api, components, testing, etc.)      |
-
-### Principles
-
-- **CLAUDE.md** stays concise — it's loaded into every conversation
-- **Detailed docs** go in separate files linked from CLAUDE.md
-- **Rules files** hold domain-specific conventions that only apply to certain tasks
-- **DECISIONS.md** is append-only — decisions are amended, never deleted
 
 ## Progress Tracking
 

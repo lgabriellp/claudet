@@ -496,13 +496,18 @@ export function writeWorktreeSandboxSettings(
     );
     if (existsSync(excludeDir)) {
       const excludeFile = resolve(excludeDir, "exclude");
-      const entry = ".claude/settings.local.json";
-      const current = existsSync(excludeFile)
+      const entries = [".claude/settings.local.json", ".claude/rules/claudet/"];
+      let current = existsSync(excludeFile)
         ? readFileSync(excludeFile, "utf-8")
         : "";
-      if (!current.split("\n").some((line) => line.trim() === entry)) {
-        const sep = current.length === 0 || current.endsWith("\n") ? "" : "\n";
-        appendFileSync(excludeFile, `${sep}${entry}\n`);
+      for (const entry of entries) {
+        if (!current.split("\n").some((line) => line.trim() === entry)) {
+          const sep =
+            current.length === 0 || current.endsWith("\n") ? "" : "\n";
+          const addition = `${sep}${entry}\n`;
+          appendFileSync(excludeFile, addition);
+          current += addition;
+        }
       }
     }
   } catch {
