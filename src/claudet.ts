@@ -1562,10 +1562,12 @@ async function createWorktree(
           await g.raw("checkout", "--detach");
         }
         s?.stop("Switched main repo to dev.");
-      } else {
-        fail(
-          `Branch "${branch}" is already checked out in worktree: ${checkedOutAt}`,
-        );
+      } else if (checkedOutAt !== wtPath) {
+        // Branch is checked out in a stale/different worktree — remove it
+        // so we can recreate at the correct path.
+        s?.start(`Removing stale worktree at ${pc.dim(checkedOutAt)}...`);
+        await g.raw("worktree", "remove", "--force", checkedOutAt);
+        s?.stop("Removed stale worktree.");
       }
     }
 
