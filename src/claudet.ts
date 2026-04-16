@@ -557,7 +557,13 @@ async function branchExists(branch: string, cwd: string): Promise<boolean> {
     await git(cwd).revparse(["--verify", branch]);
     return true;
   } catch {
-    return false;
+    // Also check remote tracking ref
+    try {
+      await git(cwd).revparse(["--verify", `origin/${branch}`]);
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
