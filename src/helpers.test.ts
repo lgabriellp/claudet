@@ -2098,8 +2098,26 @@ describe("writeWorktreeSandboxSettings", () => {
     rmSync(workRoot, { recursive: true, force: true });
   });
 
+  it("does nothing when sandbox is disabled", () => {
+    writeWorktreeSandboxSettings(wtPath, {
+      enabled: false,
+      allowedDomains: [],
+    });
+
+    const destPath = join(wtPath, ".claude", "settings.local.json");
+    expect(existsSync(destPath)).toBe(false);
+  });
+
+  it("does nothing when sandbox config is undefined", () => {
+    writeWorktreeSandboxSettings(wtPath, undefined);
+
+    const destPath = join(wtPath, ".claude", "settings.local.json");
+    expect(existsSync(destPath)).toBe(false);
+  });
+
   it("writes sandbox + bypassPermissions into settings.local.json", () => {
     writeWorktreeSandboxSettings(wtPath, {
+      enabled: true,
       allowedDomains: ["example.com", "github.com"],
     });
 
@@ -2138,6 +2156,7 @@ describe("writeWorktreeSandboxSettings", () => {
     );
 
     writeWorktreeSandboxSettings(wtPath, {
+      enabled: true,
       allowedDomains: ["example.com"],
     });
 
@@ -2173,6 +2192,7 @@ describe("writeWorktreeSandboxSettings", () => {
     symlinkSync(sourcePath, destPath);
 
     writeWorktreeSandboxSettings(wtPath, {
+      enabled: true,
       allowedDomains: ["example.com"],
     });
 
@@ -2187,7 +2207,7 @@ describe("writeWorktreeSandboxSettings", () => {
   });
 
   it("appends .claude/settings.local.json to git info/exclude", () => {
-    writeWorktreeSandboxSettings(wtPath, { allowedDomains: [] });
+    writeWorktreeSandboxSettings(wtPath, { enabled: true, allowedDomains: [] });
 
     const gitDir = execFileSync("git", ["rev-parse", "--git-common-dir"], {
       cwd: wtPath,
@@ -2202,7 +2222,7 @@ describe("writeWorktreeSandboxSettings", () => {
     expect(content).toContain(".claude/settings.local.json");
 
     // Calling again must not duplicate the entry.
-    writeWorktreeSandboxSettings(wtPath, { allowedDomains: [] });
+    writeWorktreeSandboxSettings(wtPath, { enabled: true, allowedDomains: [] });
     const after = readFileSync(excludePath, "utf-8");
     const matches = after
       .split("\n")

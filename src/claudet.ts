@@ -150,6 +150,7 @@ interface ProjectConfig {
   setup?: string[];
   protectedBranches?: string[];
   sandbox?: {
+    enabled: boolean;
     allowedDomains: string[];
     extraAllowWrite?: string[];
   };
@@ -1266,16 +1267,47 @@ async function promptSandboxDomains(
   return Array.from(domains).sort();
 }
 
-async function ensureSandboxDomains(
+async function ensureSandboxConfig(
   dataDir: string,
   slug: string,
 ): Promise<ProjectConfig> {
   const cfg = loadProjectConfig(dataDir, slug);
-  if (cfg.sandbox?.allowedDomains) return cfg;
+
+  // Already configured — backfill `enabled: true` for pre-toggle configs that
+  // have domains but no explicit `enabled` field.
+  if (cfg.sandbox) {
+    if (cfg.sandbox.enabled === undefined) {
+      const backfilled: ProjectConfig = {
+        ...cfg,
+        sandbox: { ...cfg.sandbox, enabled: true },
+      };
+      saveProjectConfig(dataDir, slug, backfilled);
+      return backfilled;
+    }
+    return cfg;
+  }
+
+  // First time — ask whether to enable the sandbox for this repo.
+  const enable = await p.confirm({
+    message: "Enable Claude Code sandbox for this repository?",
+    initialValue: true,
+  });
+  if (cancelled(enable)) bail("Cancelled.");
+
+  if (!enable) {
+    const next: ProjectConfig = {
+      ...cfg,
+      sandbox: { enabled: false, allowedDomains: [] },
+    };
+    saveProjectConfig(dataDir, slug, next);
+    p.log.info("Sandbox disabled for this repository.");
+    return next;
+  }
+
   const allowedDomains = await promptSandboxDomains();
   const next: ProjectConfig = {
     ...cfg,
-    sandbox: { ...(cfg.sandbox ?? {}), allowedDomains },
+    sandbox: { enabled: true, allowedDomains },
   };
   saveProjectConfig(dataDir, slug, next);
   const categoryCount = Object.keys(SANDBOX_DOMAIN_CATEGORIES).filter((k) =>
@@ -1643,7 +1675,7 @@ async function promptAndRegisterRepo(
     if (selected !== MANUAL) {
       const root = selected as string;
       const slug = registerRepo(dataDir, root);
-      await ensureSandboxDomains(dataDir, slug);
+      await ensureSandboxConfig(dataDir, slug);
       return { slug, repoRoot: root };
     }
   }
@@ -1679,7 +1711,7 @@ async function promptManualRepoPath(
   }
 
   const slug = registerRepo(dataDir, root);
-  await ensureSandboxDomains(dataDir, slug);
+  await ensureSandboxConfig(dataDir, slug);
   return { slug, repoRoot: root };
 }
 
@@ -1700,9 +1732,8 @@ async function interactiveFlow(): Promise<void> {
 
   const { slug, repoRoot } = await pickRepo(dataDir);
 
-  // Backfill sandbox domains for repos registered before this feature
-  // existed, and ensure the config is current for the sandbox refresh.
-  const projectConfig = await ensureSandboxDomains(dataDir, slug);
+  // Ensure sandbox config exists for this repo (backfills older repos).
+  const projectConfig = await ensureSandboxConfig(dataDir, slug);
   const globalCfg = loadGlobalConfig();
   const defaultTarget =
     projectConfig.defaultTarget || globalCfg.defaultTarget || "dev";
@@ -1851,7 +1882,7 @@ async function createNewWorktreeFlow(
   slug: string,
   repoRoot: string,
 ): Promise<void> {
-  const projectConfig = await ensureSandboxDomains(dataDir, slug);
+  const projectConfig = await ensureSandboxConfig(dataDir, slug);
   const globalConfig = loadGlobalConfig();
   const defaultTarget =
     projectConfig.defaultTarget || globalConfig.defaultTarget || "dev";

@@ -385,6 +385,7 @@ export function deriveRepoSlug(repoRoot: string): string {
 // ---------------------------------------------------------------------------
 
 export interface SandboxConfig {
+  enabled: boolean;
   allowedDomains: string[];
   extraAllowWrite?: string[];
 }
@@ -403,6 +404,7 @@ export function writeWorktreeSandboxSettings(
   wtPath: string,
   sandbox: SandboxConfig | undefined,
 ): void {
+  if (!sandbox?.enabled) return;
   const claudeDir = resolve(wtPath, ".claude");
   const destPath = resolve(claudeDir, "settings.local.json");
   if (!existsSync(claudeDir)) mkdirSync(claudeDir, { recursive: true });
