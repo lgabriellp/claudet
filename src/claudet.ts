@@ -1934,12 +1934,14 @@ async function interactiveFlow(): Promise<void> {
     },
   ];
 
+  let lastSearch = "";
   const selection = await p.autocomplete({
-    message: "Select worktree",
+    message: "Select worktree (or type a branch name to create)",
     options,
     maxItems: options.length,
     placeholder: "Type to search…",
     filter: (search, opt) => {
+      lastSearch = search;
       if (opt.value === CREATE_NEW) return true;
       const name = opt.value as string;
       const entry = data.worktrees[name];
@@ -1950,7 +1952,13 @@ async function interactiveFlow(): Promise<void> {
   if (cancelled(selection)) bail("Cancelled.");
 
   if (selection === CREATE_NEW) {
-    await createNewWorktreeFlow(dataDir, slug, repoRoot, globalCfg);
+    await createNewWorktreeFlow(
+      dataDir,
+      slug,
+      repoRoot,
+      globalCfg,
+      lastSearch.trim() || undefined,
+    );
     return;
   }
 
@@ -2013,6 +2021,7 @@ async function createNewWorktreeFlow(
   slug: string,
   repoRoot: string,
   globalCfg: GlobalConfig,
+  branchHint?: string,
 ): Promise<void> {
   const projectConfig = await ensureProjectConfig(dataDir, slug, globalCfg);
   const { defaultTarget } = projectConfig;
@@ -2043,71 +2052,85 @@ async function createNewWorktreeFlow(
   const combinedBranches = [...localBranches, ...remoteBranches];
   const remoteSet = new Set(remoteBranches);
 
-  // Step 1 — choose naming method
-  const method = await p.select({
-    message: "How do you want to name the branch?",
-    options: [
-      {
-        value: "name" as const,
-        label: "By name",
-        hint: "enter branch name directly",
-      },
-      {
-        value: "task" as const,
-        label: "By task",
-        hint: "derive from issue tracker task",
-      },
-    ],
-  });
-  if (cancelled(method)) bail("Cancelled.");
-
   let branch: string;
   let ticket: string | undefined;
 
-  if (method === "task") {
-    // Step 2b — "By task" path
-    const tracker = await p.select({
-      message: "Issue tracker",
-      options: TRACKER_PREFIXES.map((t) => ({ value: t, label: t })),
-    });
-    if (cancelled(tracker)) bail("Cancelled.");
-
-    const taskId = await p.text({
-      message: "Task ID",
-      placeholder: "PROJ-123",
-      validate: (v) => (!v ? "Task ID is required" : undefined),
-    });
-    if (cancelled(taskId)) bail("Cancelled.");
-
-    const branchInput = await p.text({
-      message: "Branch name",
-      initialValue: composeBranchFromTask(
-        tracker as TrackerPrefix,
-        taskId as string,
-      ),
-      validate: validateBranchName,
-    });
-    if (cancelled(branchInput)) bail("Cancelled.");
-
-    branch = branchInput as string;
-    ticket = taskId as string;
-  } else {
-    // Step 2a — "By name" path
-    const branchInput = await p.text({
-      message: "Branch name",
-      placeholder: "feat/new-feature",
-      validate: validateBranchName,
-    });
-    if (cancelled(branchInput)) bail("Cancelled.");
+  // If a valid branch hint was provided (e.g. from the search field), skip
+  // the naming prompts and go straight to ticket + target selection.
+  if (branchHint && !validateBranchName(branchHint)) {
+    branch = branchHint;
+    p.log.info(`Branch: ${pc.bold(branch)}`);
 
     const ticketInput = await p.text({
       message: "Issue tracker ticket",
       placeholder: "CU-abc123, JIRA-456, LIN-789 (optional)",
     });
     if (cancelled(ticketInput)) bail("Cancelled.");
-
-    branch = branchInput as string;
     ticket = (ticketInput as string) || undefined;
+  } else {
+    // Step 1 — choose naming method
+    const method = await p.select({
+      message: "How do you want to name the branch?",
+      options: [
+        {
+          value: "name" as const,
+          label: "By name",
+          hint: "enter branch name directly",
+        },
+        {
+          value: "task" as const,
+          label: "By task",
+          hint: "derive from issue tracker task",
+        },
+      ],
+    });
+    if (cancelled(method)) bail("Cancelled.");
+
+    if (method === "task") {
+      // Step 2b — "By task" path
+      const tracker = await p.select({
+        message: "Issue tracker",
+        options: TRACKER_PREFIXES.map((t) => ({ value: t, label: t })),
+      });
+      if (cancelled(tracker)) bail("Cancelled.");
+
+      const taskId = await p.text({
+        message: "Task ID",
+        placeholder: "PROJ-123",
+        validate: (v) => (!v ? "Task ID is required" : undefined),
+      });
+      if (cancelled(taskId)) bail("Cancelled.");
+
+      const branchInput = await p.text({
+        message: "Branch name",
+        initialValue: composeBranchFromTask(
+          tracker as TrackerPrefix,
+          taskId as string,
+        ),
+        validate: validateBranchName,
+      });
+      if (cancelled(branchInput)) bail("Cancelled.");
+
+      branch = branchInput as string;
+      ticket = taskId as string;
+    } else {
+      // Step 2a — "By name" path
+      const branchInput = await p.text({
+        message: "Branch name",
+        placeholder: "feat/new-feature",
+        validate: validateBranchName,
+      });
+      if (cancelled(branchInput)) bail("Cancelled.");
+
+      const ticketInput = await p.text({
+        message: "Issue tracker ticket",
+        placeholder: "CU-abc123, JIRA-456, LIN-789 (optional)",
+      });
+      if (cancelled(ticketInput)) bail("Cancelled.");
+
+      branch = branchInput as string;
+      ticket = (ticketInput as string) || undefined;
+    }
   }
 
   // Step 3 — Target branch
