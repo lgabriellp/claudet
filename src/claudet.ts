@@ -275,6 +275,7 @@ interface SessionState {
   target: string;
   context: string | null;
   objective: string | null;
+  pid: number;
 }
 
 interface SessionContext {
@@ -723,6 +724,27 @@ function sessionStatePath(sessionId: string): string {
   return join("/tmp", `claudet-worklog-${sessionId}.json`);
 }
 
+function isWorktreeRunning(entry: WorktreeEntry): boolean {
+  if (!entry.lastSessionId) return false;
+  const stateFile = sessionStatePath(entry.lastSessionId);
+  if (!existsSync(stateFile)) return false;
+  try {
+    const state = tryParseJson<{ pid?: number }>(
+      readFileSync(stateFile, "utf-8"),
+      {},
+    );
+    if (!state.pid) return false;
+    process.kill(state.pid, 0); // signal 0 = existence check
+    return true;
+  } catch {
+    // PID not alive or file unreadable — clean up stale file
+    try {
+      unlinkSync(stateFile);
+    } catch {}
+    return false;
+  }
+}
+
 function updatePlanTimeTracked(pPath: string, addMs: number): void {
   if (!existsSync(pPath)) return;
   const content = readFileSync(pPath, "utf-8");
@@ -906,6 +928,7 @@ async function worklogStart(): Promise<void> {
     target,
     context,
     objective,
+    pid: process.pid,
   };
   writeFileSync(sessionStatePath(sessionId), JSON.stringify(state));
 
@@ -1436,6 +1459,13 @@ function launchClaude(
     stdio: "inherit",
     env: process.env,
   });
+  const cleanupSession = () => {
+    if (ctx?.lastSessionId) {
+      try {
+        unlinkSync(sessionStatePath(ctx.lastSessionId));
+      } catch {}
+    }
+  };
   child.on("exit", (code) => {
     if (code && resuming) {
       console.error(pc.yellow("Session expired, starting fresh…"));
@@ -1454,8 +1484,12 @@ function launchClaude(
         stdio: "inherit",
         env: process.env,
       });
-      retry.on("exit", (c) => process.exit(c ?? 0));
+      retry.on("exit", (c) => {
+        cleanupSession();
+        process.exit(c ?? 0);
+      });
     } else {
+      cleanupSession();
       process.exit(code ?? 0);
     }
   });
@@ -1883,9 +1917,10 @@ async function interactiveFlow(): Promise<void> {
     ...activeEntries.map(([name, entry]) => {
       const status = getStatusFromPlan(planFilePath(dataDir, slug, name));
       const pr = prStatuses.get(name) ?? null;
+      const running = isWorktreeRunning(entry);
       return {
         value: name,
-        label: `${statusBadge(status, STATUS_PAD, pc)} ${entry.branch.padEnd(maxBranchLen + 2)}${prBadge(pr, pc)}`,
+        label: `${statusBadge(status, STATUS_PAD, pc)} ${entry.branch.padEnd(maxBranchLen + 2)}${prBadge(pr, pc)}${running ? pc.cyan(" [running]") : ""}`,
       };
     }),
     {
@@ -1942,6 +1977,15 @@ async function interactiveFlow(): Promise<void> {
     );
   }
   p.note(infoLines.join("\n"), selectedName);
+
+  if (isWorktreeRunning(entry)) {
+    const proceed = await p.confirm({
+      message:
+        "A Claude session appears to be running in this worktree. Launch anyway?",
+      initialValue: false,
+    });
+    if (cancelled(proceed) || !proceed) bail("Cancelled.");
+  }
 
   touchLastAccessed(dataDir, slug, selectedName);
   launchClaude(selectedWtPath, projectConfig, {
