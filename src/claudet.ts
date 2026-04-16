@@ -275,7 +275,6 @@ interface SessionState {
   target: string;
   context: string | null;
   objective: string | null;
-  pid: number;
 }
 
 interface SessionContext {
@@ -724,22 +723,22 @@ function sessionStatePath(sessionId: string): string {
   return join("/tmp", `claudet-worklog-${sessionId}.json`);
 }
 
-function isWorktreeRunning(entry: WorktreeEntry): boolean {
-  if (!entry.lastSessionId) return false;
-  const stateFile = sessionStatePath(entry.lastSessionId);
-  if (!existsSync(stateFile)) return false;
+function pidFilePath(wtPath: string): string {
+  return resolve(wtPath, ".claude", "claudet.pid");
+}
+
+function isWorktreeRunning(wtPath: string): boolean {
+  const pidFile = pidFilePath(wtPath);
+  if (!existsSync(pidFile)) return false;
   try {
-    const state = tryParseJson<{ pid?: number }>(
-      readFileSync(stateFile, "utf-8"),
-      {},
-    );
-    if (!state.pid) return false;
-    process.kill(state.pid, 0); // signal 0 = existence check
+    const pid = parseInt(readFileSync(pidFile, "utf-8").trim(), 10);
+    if (isNaN(pid)) return false;
+    process.kill(pid, 0); // signal 0 = existence check
     return true;
   } catch {
     // PID not alive or file unreadable — clean up stale file
     try {
-      unlinkSync(stateFile);
+      unlinkSync(pidFile);
     } catch {}
     return false;
   }
@@ -928,7 +927,6 @@ async function worklogStart(): Promise<void> {
     target,
     context,
     objective,
-    pid: process.pid,
   };
   writeFileSync(sessionStatePath(sessionId), JSON.stringify(state));
 
@@ -1459,7 +1457,13 @@ function launchClaude(
     stdio: "inherit",
     env: process.env,
   });
-  const cleanupSession = () => {
+  // Write PID file so other claudet instances can detect a running session.
+  const pidFile = pidFilePath(cwd);
+  writeFileSync(pidFile, String(process.pid) + "\n");
+  const cleanup = () => {
+    try {
+      unlinkSync(pidFile);
+    } catch {}
     if (ctx?.lastSessionId) {
       try {
         unlinkSync(sessionStatePath(ctx.lastSessionId));
@@ -1485,11 +1489,11 @@ function launchClaude(
         env: process.env,
       });
       retry.on("exit", (c) => {
-        cleanupSession();
+        cleanup();
         process.exit(c ?? 0);
       });
     } else {
-      cleanupSession();
+      cleanup();
       process.exit(code ?? 0);
     }
   });
@@ -1917,7 +1921,7 @@ async function interactiveFlow(): Promise<void> {
     ...activeEntries.map(([name, entry]) => {
       const status = getStatusFromPlan(planFilePath(dataDir, slug, name));
       const pr = prStatuses.get(name) ?? null;
-      const running = isWorktreeRunning(entry);
+      const running = isWorktreeRunning(wtDirPath(dataDir, slug, name));
       return {
         value: name,
         label: `${statusBadge(status, STATUS_PAD, pc)} ${entry.branch.padEnd(maxBranchLen + 2)}${prBadge(pr, pc)}${running ? pc.cyan(" [running]") : ""}`,
@@ -1978,7 +1982,7 @@ async function interactiveFlow(): Promise<void> {
   }
   p.note(infoLines.join("\n"), selectedName);
 
-  if (isWorktreeRunning(entry)) {
+  if (isWorktreeRunning(selectedWtPath)) {
     const proceed = await p.confirm({
       message:
         "A Claude session appears to be running in this worktree. Launch anyway?",

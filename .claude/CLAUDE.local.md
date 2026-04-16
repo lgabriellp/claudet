@@ -1,8 +1,8 @@
 ## Worktree Session
 
-**Plan file:** /Users/lgabriel/.claudet/repos/vibe--claudet/plans/new-repo.md
-**Branch:** feature/new-repo → dev
-**PR target:** dev (use `--base dev` when creating PRs)
+**Plan file:** /Users/lgabriel/.claudet/repos/vibe--claudet/plans/main.md
+**Branch:** main → main
+**PR target:** main (use `--base main` when creating PRs)
 
 ### Session Protocol
 
