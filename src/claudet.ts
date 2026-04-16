@@ -63,6 +63,10 @@ import {
   sortBranchesDefaultFirst,
   parseCleanFlags,
   writeWorktreeSandboxSettings,
+  GlobalConfigSchema,
+  ProjectConfigSchema,
+  type GlobalConfig,
+  type ProjectConfig,
   type CleanFlags,
   type CreateFlags,
   type HookDefinition,
@@ -145,32 +149,17 @@ function tryReadFileSync(filePath: string, fallback = ""): string {
 // Configuration & path resolution
 // ---------------------------------------------------------------------------
 
-interface ProjectConfig {
-  defaultTarget?: string;
-  setup?: string[];
-  protectedBranches?: string[];
-  sandbox?: {
-    enabled: boolean;
-    allowedDomains: string[];
-    extraAllowWrite?: string[];
-  };
-}
-
-interface GlobalConfig {
-  dataDir?: string;
-  scanDirs?: string[];
-  highPriorityTarget?: string;
-  defaultTarget?: string;
-}
-
 const GLOBAL_CONFIG_PATH = resolve(HOME, ".claudet", "config.json");
 
-function loadGlobalConfig(): GlobalConfig {
+function loadGlobalConfigRaw(): Record<string, unknown> {
   if (!existsSync(GLOBAL_CONFIG_PATH)) return {};
-  return tryParseJson<GlobalConfig>(tryReadFileSync(GLOBAL_CONFIG_PATH), {});
+  return tryParseJson<Record<string, unknown>>(
+    tryReadFileSync(GLOBAL_CONFIG_PATH),
+    {},
+  );
 }
 
-function saveGlobalConfig(config: GlobalConfig): void {
+function saveGlobalConfig(config: Record<string, unknown>): void {
   const dir = dirname(GLOBAL_CONFIG_PATH);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   writeFileSync(GLOBAL_CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
@@ -180,16 +169,19 @@ function projectConfigPath(dataDir: string, slug: string): string {
   return resolve(dataDir, "repos", slug, "config.json");
 }
 
-function loadProjectConfig(dataDir: string, slug: string): ProjectConfig {
+function loadProjectConfigRaw(
+  dataDir: string,
+  slug: string,
+): Record<string, unknown> {
   const cfgPath = projectConfigPath(dataDir, slug);
   if (!existsSync(cfgPath)) return {};
-  return tryParseJson<ProjectConfig>(tryReadFileSync(cfgPath), {});
+  return tryParseJson<Record<string, unknown>>(tryReadFileSync(cfgPath), {});
 }
 
 function saveProjectConfig(
   dataDir: string,
   slug: string,
-  config: ProjectConfig,
+  config: Record<string, unknown>,
 ): void {
   const cfgPath = projectConfigPath(dataDir, slug);
   const dir = dirname(cfgPath);
@@ -204,9 +196,9 @@ function resolveDataDir(): string {
   }
 
   // 2. Global config
-  const globalConfig = loadGlobalConfig();
-  if (globalConfig.dataDir) {
-    return resolve(expandHome(globalConfig.dataDir));
+  const raw = loadGlobalConfigRaw();
+  if (typeof raw.dataDir === "string" && raw.dataDir) {
+    return resolve(expandHome(raw.dataDir));
   }
 
   // 3. Default
@@ -343,7 +335,7 @@ function registerRepo(dataDir: string, repoRoot: string): string {
         tryReadFileSync(legacyPath),
         {},
       );
-      const migrated: ProjectConfig = {};
+      const migrated: Record<string, unknown> = {};
       if (typeof legacy.defaultTarget === "string")
         migrated.defaultTarget = legacy.defaultTarget;
       if (Array.isArray(legacy.setup)) migrated.setup = legacy.setup;
@@ -1267,49 +1259,60 @@ async function promptSandboxDomains(
   return Array.from(domains).sort();
 }
 
-async function ensureSandboxConfig(
-  dataDir: string,
-  slug: string,
-): Promise<ProjectConfig> {
-  const cfg = loadProjectConfig(dataDir, slug);
+// ---------------------------------------------------------------------------
+// Generic config prompt helpers
+// ---------------------------------------------------------------------------
 
-  // Already configured — backfill `enabled: true` for pre-toggle configs that
-  // have domains but no explicit `enabled` field.
-  if (cfg.sandbox) {
-    if (cfg.sandbox.enabled === undefined) {
-      const backfilled: ProjectConfig = {
-        ...cfg,
-        sandbox: { ...cfg.sandbox, enabled: true },
-      };
-      saveProjectConfig(dataDir, slug, backfilled);
-      return backfilled;
-    }
-    return cfg;
-  }
+async function promptString(
+  message: string,
+  placeholder: string,
+  initial?: string,
+): Promise<string> {
+  const input = await p.text({
+    message,
+    placeholder,
+    defaultValue: initial || placeholder,
+    initialValue: initial || "",
+  });
+  if (cancelled(input)) bail("Cancelled.");
+  return (input as string).trim() || placeholder;
+}
 
-  // First time — ask whether to enable the sandbox for this repo.
+async function promptStringList(
+  message: string,
+  placeholder: string,
+  initial?: string[],
+): Promise<string[]> {
+  const input = await p.text({
+    message,
+    placeholder,
+    defaultValue: initial?.join(", ") || placeholder,
+    initialValue: initial?.join(", ") || "",
+  });
+  if (cancelled(input)) bail("Cancelled.");
+  return (input as string)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+async function promptSandboxConfig(inherited?: {
+  enabled: boolean;
+  allowedDomains: string[];
+}): Promise<{ enabled: boolean; allowedDomains: string[] }> {
   const enable = await p.confirm({
-    message: "Enable Claude Code sandbox for this repository?",
-    initialValue: true,
+    message: "Enable Claude Code sandbox?",
+    initialValue: inherited?.enabled ?? true,
   });
   if (cancelled(enable)) bail("Cancelled.");
 
   if (!enable) {
-    const next: ProjectConfig = {
-      ...cfg,
-      sandbox: { enabled: false, allowedDomains: [] },
-    };
-    saveProjectConfig(dataDir, slug, next);
-    p.log.info("Sandbox disabled for this repository.");
-    return next;
+    return { enabled: false, allowedDomains: [] };
   }
 
-  const allowedDomains = await promptSandboxDomains();
-  const next: ProjectConfig = {
-    ...cfg,
-    sandbox: { enabled: true, allowedDomains },
-  };
-  saveProjectConfig(dataDir, slug, next);
+  const allowedDomains = await promptSandboxDomains(
+    inherited?.allowedDomains ?? [],
+  );
   const categoryCount = Object.keys(SANDBOX_DOMAIN_CATEGORIES).filter((k) =>
     SANDBOX_DOMAIN_CATEGORIES[k]!.every((d) => allowedDomains.includes(d)),
   ).length;
@@ -1319,7 +1322,98 @@ async function ensureSandboxConfig(
     }`,
     "Sandbox domains saved",
   );
-  return next;
+  return { enabled: true, allowedDomains };
+}
+
+// ---------------------------------------------------------------------------
+// Config ensure functions (validate via Zod, prompt for missing fields)
+// ---------------------------------------------------------------------------
+
+async function ensureGlobalConfig(): Promise<GlobalConfig> {
+  const raw = loadGlobalConfigRaw();
+  const result = GlobalConfigSchema.safeParse(raw);
+  if (result.success) return result.data;
+
+  const missing = new Set(result.error.issues.map((i) => String(i.path[0])));
+  const cfg: Record<string, unknown> = { ...raw };
+
+  if (missing.has("scanDirs")) {
+    cfg.scanDirs = await promptStringList(
+      "Directories to scan for git repos (comma-separated)",
+      "~/repos, ~/work",
+    );
+  }
+  if (missing.has("highPriorityTarget")) {
+    cfg.highPriorityTarget = await promptString(
+      "High-priority target branch (sort first)",
+      "main",
+    );
+  }
+  if (missing.has("defaultTarget")) {
+    cfg.defaultTarget = await promptString(
+      "Default target branch (base for branching & PRs)",
+      "dev",
+    );
+  }
+  if (missing.has("protectedBranches")) {
+    cfg.protectedBranches = await promptStringList(
+      "Protected branches (comma-separated)",
+      "main, dev, prod",
+    );
+  }
+  if (missing.has("setup")) {
+    cfg.setup = await promptStringList(
+      "Default setup commands (comma-separated, or empty)",
+      "",
+    );
+  }
+  if (missing.has("sandbox")) {
+    cfg.sandbox = await promptSandboxConfig();
+  }
+
+  saveGlobalConfig(cfg);
+  return GlobalConfigSchema.parse(cfg);
+}
+
+async function ensureProjectConfig(
+  dataDir: string,
+  slug: string,
+  globalCfg: GlobalConfig,
+): Promise<ProjectConfig> {
+  const raw = loadProjectConfigRaw(dataDir, slug);
+  const result = ProjectConfigSchema.safeParse(raw);
+  if (result.success) return result.data;
+
+  const missing = new Set(result.error.issues.map((i) => String(i.path[0])));
+  const cfg: Record<string, unknown> = { ...raw };
+
+  if (missing.has("defaultTarget")) {
+    cfg.defaultTarget = await promptString(
+      "Default target branch for this repo",
+      "dev",
+      globalCfg.defaultTarget,
+    );
+  }
+  if (missing.has("protectedBranches")) {
+    cfg.protectedBranches = await promptStringList(
+      "Protected branches for this repo (comma-separated)",
+      "main, dev, prod",
+      globalCfg.protectedBranches,
+    );
+  }
+  if (missing.has("setup")) {
+    cfg.setup = await promptStringList(
+      "Setup commands for this repo (comma-separated, or empty)",
+      "",
+      globalCfg.setup,
+    );
+  }
+  if (missing.has("sandbox")) {
+    cfg.sandbox = await promptSandboxConfig(globalCfg.sandbox);
+  }
+
+  saveProjectConfig(dataDir, slug, cfg);
+  return ProjectConfigSchema.parse(cfg);
 }
 
 function launchClaude(
@@ -1398,6 +1492,7 @@ async function createWorktree(
   target: string,
   shortName: string,
   skipSetup: boolean,
+  projectConfig: ProjectConfig,
   ticket?: string,
   quiet?: boolean,
 ): Promise<CreateWorktreeResult> {
@@ -1482,8 +1577,6 @@ async function createWorktree(
   // Post-creation setup: symlinks, setup commands, plan, metadata.
   // Wrapped in try-catch to clean up on failure — prevents orphaned worktrees.
   try {
-    const projectConfig = loadProjectConfig(dataDir, slug);
-
     // Symlink .claude/settings.local.json
     const localSettings = resolve(repoRoot, ".claude", "settings.local.json");
     if (existsSync(localSettings)) {
@@ -1590,6 +1683,7 @@ async function createWorktree(
 
 async function pickRepo(
   dataDir: string,
+  globalCfg: GlobalConfig,
 ): Promise<{ slug: string; repoRoot: string }> {
   const slugs = loadRepoSlugs(dataDir);
   const repos = slugs
@@ -1609,7 +1703,7 @@ async function pickRepo(
     );
 
   if (repos.length === 0) {
-    return promptAndRegisterRepo(dataDir);
+    return promptAndRegisterRepo(dataDir, globalCfg);
   }
 
   const ADD_NEW = "__add_new_repo__";
@@ -1633,7 +1727,7 @@ async function pickRepo(
   if (cancelled(selected)) bail("Cancelled.");
 
   if (selected === ADD_NEW) {
-    return promptAndRegisterRepo(dataDir);
+    return promptAndRegisterRepo(dataDir, globalCfg);
   }
 
   return repos.find((r) => r.slug === (selected as string))!;
@@ -1641,10 +1735,9 @@ async function pickRepo(
 
 async function promptAndRegisterRepo(
   dataDir: string,
+  globalCfg: GlobalConfig,
 ): Promise<{ slug: string; repoRoot: string }> {
-  const globalConfig = loadGlobalConfig();
-  const scanDirs = globalConfig.scanDirs ?? ["~/repos"];
-  const discovered = scanForGitRepos(scanDirs);
+  const discovered = scanForGitRepos(globalCfg.scanDirs);
 
   // Filter out already-registered repos
   const slugs = loadRepoSlugs(dataDir);
@@ -1675,16 +1768,17 @@ async function promptAndRegisterRepo(
     if (selected !== MANUAL) {
       const root = selected as string;
       const slug = registerRepo(dataDir, root);
-      await ensureSandboxConfig(dataDir, slug);
+      await ensureProjectConfig(dataDir, slug, globalCfg);
       return { slug, repoRoot: root };
     }
   }
 
-  return promptManualRepoPath(dataDir);
+  return promptManualRepoPath(dataDir, globalCfg);
 }
 
 async function promptManualRepoPath(
   dataDir: string,
+  globalCfg: GlobalConfig,
 ): Promise<{ slug: string; repoRoot: string }> {
   const input = await p.text({
     message: "Enter path to git repository",
@@ -1711,7 +1805,7 @@ async function promptManualRepoPath(
   }
 
   const slug = registerRepo(dataDir, root);
-  await ensureSandboxConfig(dataDir, slug);
+  await ensureProjectConfig(dataDir, slug, globalCfg);
   return { slug, repoRoot: root };
 }
 
@@ -1730,24 +1824,26 @@ async function interactiveFlow(): Promise<void> {
   ensureContextDocs();
   await ensureToolPermissions();
 
-  const { slug, repoRoot } = await pickRepo(dataDir);
+  const globalCfg = await ensureGlobalConfig();
+  const { slug, repoRoot } = await pickRepo(dataDir, globalCfg);
 
-  // Ensure sandbox config exists for this repo (backfills older repos).
-  const projectConfig = await ensureSandboxConfig(dataDir, slug);
-  const globalCfg = loadGlobalConfig();
-  const defaultTarget =
-    projectConfig.defaultTarget || globalCfg.defaultTarget || "dev";
+  const projectConfig = await ensureProjectConfig(dataDir, slug, globalCfg);
 
   const s = p.spinner();
   s.start("Loading worktrees...");
-  const data = await reconcileWorktrees(dataDir, slug, repoRoot, defaultTarget);
+  const data = await reconcileWorktrees(
+    dataDir,
+    slug,
+    repoRoot,
+    projectConfig.defaultTarget,
+  );
   const activeCount = Object.entries(data.worktrees).filter(
     ([name, entry]) => !entry.archivedAt && !isSmokeTestWorktree(name),
   ).length;
   s.stop(activeCount > 0 ? "Worktrees loaded." : "No active worktrees found.");
 
   const EPOCH = "1970-01-01T00:00:00.000Z";
-  const highPriorityTarget = globalCfg.highPriorityTarget ?? "main";
+  const { highPriorityTarget } = globalCfg;
 
   const activeEntries = Object.entries(data.worktrees)
     .filter(([name, entry]) => !entry.archivedAt && !isSmokeTestWorktree(name))
@@ -1759,7 +1855,7 @@ async function interactiveFlow(): Promise<void> {
     );
 
   if (activeEntries.length === 0) {
-    await createNewWorktreeFlow(dataDir, slug, repoRoot);
+    await createNewWorktreeFlow(dataDir, slug, repoRoot, globalCfg);
     return;
   }
 
@@ -1828,7 +1924,7 @@ async function interactiveFlow(): Promise<void> {
   if (cancelled(selection)) bail("Cancelled.");
 
   if (selection === CREATE_NEW) {
-    await createNewWorktreeFlow(dataDir, slug, repoRoot);
+    await createNewWorktreeFlow(dataDir, slug, repoRoot, globalCfg);
     return;
   }
 
@@ -1881,11 +1977,10 @@ async function createNewWorktreeFlow(
   dataDir: string,
   slug: string,
   repoRoot: string,
+  globalCfg: GlobalConfig,
 ): Promise<void> {
-  const projectConfig = await ensureSandboxConfig(dataDir, slug);
-  const globalConfig = loadGlobalConfig();
-  const defaultTarget =
-    projectConfig.defaultTarget || globalConfig.defaultTarget || "dev";
+  const projectConfig = await ensureProjectConfig(dataDir, slug, globalCfg);
+  const { defaultTarget } = projectConfig;
 
   // Fetch remote refs so the list is up to date
   await git(repoRoot).fetch(["--prune"]);
@@ -2009,6 +2104,7 @@ async function createNewWorktreeFlow(
     targetBranch,
     shortName,
     false,
+    projectConfig,
     ticket,
   );
 
@@ -2043,13 +2139,9 @@ async function createCommand(): Promise<void> {
 
   const dataDir = resolveDataDir();
   const slug = registerRepo(dataDir, repoRoot);
-  const projectConfig = loadProjectConfig(dataDir, slug);
-  const globalConfig = loadGlobalConfig();
-  const target =
-    flags.target ||
-    projectConfig.defaultTarget ||
-    globalConfig.defaultTarget ||
-    "dev";
+  const globalCfg = await ensureGlobalConfig();
+  const projectConfig = await ensureProjectConfig(dataDir, slug, globalCfg);
+  const target = flags.target || projectConfig.defaultTarget;
   const shortName = deriveShortName(flags.branch);
 
   // Pre-validate
@@ -2074,6 +2166,7 @@ async function createCommand(): Promise<void> {
     target,
     shortName,
     flags.skipSetup,
+    projectConfig,
     flags.ticket,
     true,
   );
@@ -2147,12 +2240,11 @@ async function cleanFlow(flags: CleanFlags): Promise<void> {
     return;
   }
 
-  const { slug, repoRoot } = await pickRepo(dataDir);
+  const globalCfg = await ensureGlobalConfig();
+  const { slug, repoRoot } = await pickRepo(dataDir, globalCfg);
 
-  const projectConfig = loadProjectConfig(dataDir, slug);
-  const protectedBranches = new Set(
-    projectConfig.protectedBranches ?? ["main", "dev", "prod"],
-  );
+  const projectConfig = await ensureProjectConfig(dataDir, slug, globalCfg);
+  const protectedBranches = new Set(projectConfig.protectedBranches);
 
   const data = loadWorktrees(dataDir, slug);
   const allEntries = Object.entries(data.worktrees);
@@ -2511,67 +2603,82 @@ function installCommand(): void {
 // ---------------------------------------------------------------------------
 
 async function runInitSetup(): Promise<void> {
-  const existing = loadGlobalConfig();
-
-  const scanDirsInput = await p.text({
-    message: "Directories to scan for git repos (comma-separated)",
-    placeholder: "~/repos, ~/work",
-    defaultValue: existing.scanDirs?.join(", ") || "~/repos",
-    initialValue: existing.scanDirs?.join(", ") || "",
-  });
-  if (cancelled(scanDirsInput)) bail("Cancelled.");
-
-  const highPriorityTargetInput = await p.text({
-    message: "High-priority target (sort first)",
-    placeholder: "main",
-    defaultValue: existing.highPriorityTarget || "main",
-    initialValue: existing.highPriorityTarget || "",
-  });
-  if (cancelled(highPriorityTargetInput)) bail("Cancelled.");
-
-  const defaultTargetInput = await p.text({
-    message: "Default target branch (base for branching & PRs)",
-    placeholder: "dev",
-    defaultValue: existing.defaultTarget || "dev",
-    initialValue: existing.defaultTarget || "",
-  });
-  if (cancelled(defaultTargetInput)) bail("Cancelled.");
+  const existing = loadGlobalConfigRaw();
+  const existingStr = (k: string) =>
+    typeof existing[k] === "string" ? (existing[k] as string) : undefined;
+  const existingArr = (k: string) =>
+    Array.isArray(existing[k]) ? (existing[k] as string[]) : undefined;
+  const existingSandbox = existing.sandbox as
+    | { enabled?: boolean; allowedDomains?: string[] }
+    | undefined;
 
   const dataDirInput = await p.text({
     message: "Data directory for claudet",
     placeholder: "~/.claudet",
-    defaultValue: existing.dataDir || "~/.claudet",
-    initialValue: existing.dataDir || "",
+    defaultValue: existingStr("dataDir") || "~/.claudet",
+    initialValue: existingStr("dataDir") || "",
   });
   if (cancelled(dataDirInput)) bail("Cancelled.");
-
-  const scanDirs = (scanDirsInput as string)
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
   const dataDir = (dataDirInput as string).trim() || "~/.claudet";
 
-  const highPriorityTarget =
-    (highPriorityTargetInput as string).trim() || "main";
-  const defaultTarget = (defaultTargetInput as string).trim() || "dev";
+  const scanDirs = await promptStringList(
+    "Directories to scan for git repos (comma-separated)",
+    "~/repos, ~/work",
+    existingArr("scanDirs"),
+  );
+  const highPriorityTarget = await promptString(
+    "High-priority target branch (sort first)",
+    "main",
+    existingStr("highPriorityTarget"),
+  );
+  const defaultTarget = await promptString(
+    "Default target branch (base for branching & PRs)",
+    "dev",
+    existingStr("defaultTarget"),
+  );
+  const protectedBranches = await promptStringList(
+    "Protected branches (comma-separated)",
+    "main, dev, prod",
+    existingArr("protectedBranches"),
+  );
+  const setup = await promptStringList(
+    "Default setup commands (comma-separated, or empty)",
+    "",
+    existingArr("setup"),
+  );
+  const sandbox = await promptSandboxConfig(
+    existingSandbox?.enabled !== undefined
+      ? {
+          enabled: existingSandbox.enabled,
+          allowedDomains: existingSandbox.allowedDomains ?? [],
+        }
+      : undefined,
+  );
 
-  const config: GlobalConfig = { scanDirs };
+  const config: Record<string, unknown> = {
+    ...existing,
+    scanDirs,
+    highPriorityTarget,
+    defaultTarget,
+    protectedBranches,
+    setup,
+    sandbox,
+  };
   if (dataDir !== "~/.claudet") {
     config.dataDir = dataDir;
-  }
-  if (highPriorityTarget !== "main") {
-    config.highPriorityTarget = highPriorityTarget;
-  }
-  if (defaultTarget !== "dev") {
-    config.defaultTarget = defaultTarget;
+  } else {
+    delete config.dataDir;
   }
 
   p.note(
     [
+      `${pc.dim("Data dir")}        ${dataDir}`,
       `${pc.dim("Scan dirs")}       ${scanDirs.join(", ")}`,
       `${pc.dim("High priority")}   ${highPriorityTarget}`,
-      `${pc.dim("Normal target")}   ${defaultTarget}`,
-      `${pc.dim("Data dir")}        ${dataDir}`,
+      `${pc.dim("Default target")}  ${defaultTarget}`,
+      `${pc.dim("Protected")}       ${protectedBranches.join(", ")}`,
+      `${pc.dim("Setup")}           ${setup.length ? setup.join(", ") : "(none)"}`,
+      `${pc.dim("Sandbox")}         ${sandbox.enabled ? "enabled" : "disabled"}`,
       `${pc.dim("Config")}          ${GLOBAL_CONFIG_PATH}`,
     ].join("\n"),
     "Settings",

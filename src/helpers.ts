@@ -381,14 +381,39 @@ export function deriveRepoSlug(repoRoot: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Sandbox settings
+// Config schemas (Zod)
 // ---------------------------------------------------------------------------
 
-export interface SandboxConfig {
-  enabled: boolean;
-  allowedDomains: string[];
-  extraAllowWrite?: string[];
-}
+const SandboxConfigSchema = z.object({
+  enabled: z.boolean(),
+  allowedDomains: z.array(z.string()),
+  extraAllowWrite: z.array(z.string()).optional(),
+});
+
+export const GlobalConfigSchema = z.object({
+  dataDir: z.string().optional(),
+  scanDirs: z.array(z.string()),
+  highPriorityTarget: z.string(),
+  defaultTarget: z.string(),
+  protectedBranches: z.array(z.string()),
+  setup: z.array(z.string()),
+  sandbox: SandboxConfigSchema,
+});
+
+export const ProjectConfigSchema = z.object({
+  defaultTarget: z.string(),
+  setup: z.array(z.string()),
+  protectedBranches: z.array(z.string()),
+  sandbox: SandboxConfigSchema,
+});
+
+export type SandboxConfig = z.infer<typeof SandboxConfigSchema>;
+export type GlobalConfig = z.infer<typeof GlobalConfigSchema>;
+export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
+
+// ---------------------------------------------------------------------------
+// Sandbox settings
+// ---------------------------------------------------------------------------
 
 /**
  * Writes `.claude/settings.local.json` inside a worktree with the Claude Code
