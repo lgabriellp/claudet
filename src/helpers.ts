@@ -326,11 +326,23 @@ ${ticketSection}
 ## Target Branch
 ${opts.target || "dev"}
 
+## Decisions
+<!-- Indexed list of choices, rationale, and constraints -->
+
 ## Key Files
 <!-- Files that will be created/modified -->
 
 ## Test Scenarios
-<!-- Test plan grouped by tier -->
+<!-- Test plan grouped by tier, each referencing a decision or the objective -->
+
+## Manual Tests
+<!-- Steps to verify the changes manually -->
+
+## Implementation
+<!-- Key files, approach, and step-by-step plan -->
+
+## Verification
+<!-- How to confirm the changes work end-to-end -->
 
 ## Status
 pending

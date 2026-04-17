@@ -27,12 +27,20 @@ Why this change is needed — the problem or opportunity that prompted it.
 
 A concise statement of what will be done. Keep it clear and to the point — one or two sentences. Details, trade-offs, and choices belong in Decisions.
 
+## Target Branch
+
+The base branch for the PR (e.g., dev, main).
+
 ## Decisions
 
 Indexed list of all decisions made during planning. Each decision captures a choice, its rationale, and any constraints. New decisions are appended as they arise.
 
 1. **<Decision title>** — <What was decided and why>
 2. **<Decision title>** — <What was decided and why>
+
+## Key Files
+
+Files that will be created or modified.
 
 ## Test Scenarios
 
@@ -54,6 +62,10 @@ How to confirm the changes work end-to-end — commands, tests, manual checks.
 
 pending | in-progress | review | done
 
+## Time Tracked
+
+Cumulative session time (e.g., 2h 45m).
+
 ## Progress
 
 Append-only log of work done each session.
@@ -69,16 +81,49 @@ Append-only log of work done each session.
 - **Verification** is required — how to confirm everything works end-to-end
 - **Status** and **Progress** are required for session continuity
 
-### Coherence Check
+### Layered Planning Protocol
 
-Before proceeding with implementation, review Context, Objective, Decisions, and the project's `DECISIONS.md` (if it exists) for incoherences. If any of the following are true, **ask the user for clarification before continuing**:
+Plan sections are validated one layer at a time. For each layer, Claude explores the codebase to verify claims, then presents all statements as a multi-select checklist via `AskUserQuestion`. **Never author layer N+1 until all statements in layer N are checked.**
 
-- A decision contradicts the objective or context
-- A decision contradicts an existing ADR in `DECISIONS.md`
-- The objective is vague or contains implementation details that belong in Decisions
-- Decisions reference constraints or requirements not mentioned in Context
-- Two decisions conflict with each other
-- A test scenario doesn't trace back to a decision or the objective
+**Validation criteria per layer:**
+
+**Context:**
+
+- Verify referenced systems, tools, or integrations exist in the codebase
+- Confirm the problem is real (e.g., if it says "no current way to X", check that X doesn't already exist)
+- Check that mentioned constraints are accurate (API limitations, architectural boundaries)
+
+**Objective:**
+
+- Confirm it's concise (1-2 sentences) with no embedded decisions (see Objective Guidelines)
+- Verify it's achievable given the approved Context
+- Check it's scoped to one worktree's worth of work
+
+**Decisions:**
+
+- For each decision, grep/glob the codebase to verify referenced functions, APIs, and patterns exist
+- Check rationale holds given the current codebase state
+
+**Test Scenarios:**
+
+- Verify each scenario traces to a decision (by number) or the objective
+- Check that Arrange steps are feasible (referenced utilities, data shapes exist)
+- Check that Assert steps are verifiable (expected values are realistic)
+
+**Approval flow (same for every layer):**
+
+1. Validate all statements in the layer against the codebase
+2. Present each statement as a checkbox in a multi-select `AskUserQuestion`, with validation status in the description
+3. User checks correct statements, leaves incorrect ones unchecked, and may add notes or new statements via "Other"
+4. For unchecked statements: revise based on user feedback, propose amendments or additions
+5. Re-present the updated checklist — repeat until all statements are checked
+6. **After Decisions are fully approved**, run the coherence check:
+   - Check for conflicts between decisions
+   - Check for conflicts with `DECISIONS.md` ADRs (if the file exists)
+   - Verify decisions cover the full scope of the objective (no gaps)
+   - If inconsistencies are found, propose new amendment decisions and re-present for approval
+
+After all four layers are approved, proceed to Implementation, Manual Tests, and Verification without additional gates — they follow directly from approved decisions.
 
 ## Scope Discipline
 

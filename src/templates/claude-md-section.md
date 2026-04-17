@@ -14,6 +14,6 @@
 - **Decisions** is an indexed, append-only list right after Objective
 - **Test Scenarios** and **Manual Tests** must reference a decision (by number) or the objective
 - **Implementation** section follows Manual Tests — no coding before the plan is complete
-- Before implementing, check Context/Objective/Decisions against `DECISIONS.md` for incoherences — ask for clarification if found
+- Layered planning: validate and get approval for each section (Context → Objective → Decisions → Test Scenarios) before writing the next
 - When implementation and verification are complete, ask the user to commit, push, and create a PR
 - Architectural decisions require an **ADR-first** workflow: write the ADR in `DECISIONS.md` before implementing
