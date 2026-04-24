@@ -59,6 +59,10 @@ pending | in-progress | review | done
 Append-only log of work done each session.
 ```
 
+### Structure Enforcement
+
+If the current plan file does not follow the section order above, restructure it to match before continuing work. Remove any deprecated sections (`Ticket`, `Key Files`, `Time Tracked`). Add any missing required sections with empty bodies. The plan template is the source of truth for structure.
+
 ### Required Fields
 
 - **Context** and **Objective** are always required — they frame the "why" and "what"

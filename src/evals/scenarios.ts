@@ -9,11 +9,10 @@ export interface EvalScenario {
     planStatus: "pending" | "in-progress";
     context?: string;
     objective?: string;
+    decisions?: string[];
     targetBranch: string;
     branch: string;
     progressEntries?: string[];
-    ticket?: string;
-    timeTracked?: string;
   };
   prompt: string;
   judgeCriteria: string[];
@@ -71,16 +70,15 @@ export const SCENARIOS: EvalScenario[] = [
       planStatus: "pending",
       targetBranch: "dev",
       branch: "feature/dark-mode",
-      ticket: "JIRA-123",
     },
     prompt:
       "load plan and start planning. The task is: add a dark mode toggle to the settings page",
     judgeCriteria: [
       "Does the proposed plan include a Context section explaining why this change is needed?",
       "Does the proposed plan include an Objective section explaining what will be done?",
+      "Does the proposed plan include a Decisions section recording choices made?",
       "Does the proposed plan include a Verification section describing how to confirm changes work?",
       "Does the proposed plan include Test Scenarios using AAA format (Arrange, Act, Assert)?",
-      "Does the proposed plan include Key Files listing files to create or modify?",
     ],
   },
   {
@@ -187,9 +185,8 @@ export const SCENARIOS: EvalScenario[] = [
     ],
   },
   {
-    name: "worklog-time-awareness",
-    description:
-      "Claude references time tracked and session history from the plan",
+    name: "worklog-progress-awareness",
+    description: "Claude references session history and progress from the plan",
     fixture: {
       planStatus: "in-progress",
       context: "The search feature returns too many irrelevant results.",
@@ -197,7 +194,6 @@ export const SCENARIOS: EvalScenario[] = [
         "Implement full-text search with relevance scoring and pagination.",
       targetBranch: "dev",
       branch: "feature/search-improvements",
-      timeTracked: "12h 30m",
       progressEntries: [
         "2026-03-10 10:00: Started implementation, evaluated search libraries",
         "2026-03-11 09:00: Integrated Lunr.js, added indexing pipeline",
@@ -205,12 +201,11 @@ export const SCENARIOS: EvalScenario[] = [
         "2026-03-14 10:00: Implemented pagination UI, 80% through the feature",
       ],
     },
-    prompt:
-      "load plan. How much progress have we made and how much time have we spent?",
+    prompt: "load plan. How much progress have we made so far?",
     judgeCriteria: [
-      "Did Claude reference the time tracked (12h 30m or approximately 12.5 hours)?",
       "Did Claude summarize the progress history across the 4 entries?",
       "Did Claude indicate the feature is approximately 80% complete based on the last entry?",
+      "Did Claude reference specific milestones from the progress entries (e.g. Lunr.js, relevance scoring, pagination)?",
     ],
   },
   {
@@ -298,6 +293,74 @@ export const SCENARIOS: EvalScenario[] = [
       "Did Claude correct the user and mention release/v3 as the correct target branch?",
       "Did Claude NOT agree to target main?",
       "Did Claude reference the plan file as the source of truth for the target branch?",
+    ],
+  },
+  // ---------------------------------------------------------------------------
+  // Plan structure evals — verify Claude uses new plan sections correctly
+  // ---------------------------------------------------------------------------
+  {
+    name: "fills-decisions-when-planning",
+    description:
+      "When planning, Claude populates the Decisions section with indexed entries",
+    fixture: {
+      planStatus: "pending",
+      targetBranch: "dev",
+      branch: "feature/notifications",
+    },
+    prompt:
+      "load plan and start planning. The task is: add push notifications using Firebase Cloud Messaging. We need to decide between FCM HTTP v1 API and the legacy API, and whether to use a service worker or the Firebase SDK.",
+    judgeCriteria: [
+      "Does Claude's proposed plan include a Decisions section?",
+      "Does the Decisions section contain numbered entries (e.g. 1., 2.)?",
+      "Does at least one decision address the FCM API choice (HTTP v1 vs legacy)?",
+      "Does at least one decision address the service worker vs SDK choice?",
+    ],
+  },
+  {
+    name: "fills-implementation-when-planning",
+    description:
+      "When planning, Claude populates Implementation with key files and steps",
+    fixture: {
+      planStatus: "pending",
+      targetBranch: "dev",
+      branch: "feature/csv-export",
+    },
+    prompt:
+      "load plan and start planning. The task is: add CSV export to the reports page. Users should be able to click an Export button and download a CSV of the currently filtered data.",
+    judgeCriteria: [
+      "Does Claude's proposed plan include an Implementation section?",
+      "Does the Implementation section list specific files to create or modify?",
+      "Does the Implementation section describe a step-by-step approach?",
+      "Does Claude's proposed plan include a Manual Tests section with steps to verify the export?",
+    ],
+  },
+  {
+    name: "continues-with-existing-decisions",
+    description:
+      "When resuming, Claude references existing Decisions and builds on them",
+    fixture: {
+      planStatus: "in-progress",
+      context:
+        "The API currently returns all fields for every resource. Clients waste bandwidth parsing unused data.",
+      objective:
+        "Add field selection (sparse fieldsets) to the REST API so clients can request only the fields they need.",
+      decisions: [
+        "1. **Query parameter syntax** — Use `?fields=name,email,avatar` comma-separated format. Simpler than JSON-API bracket syntax for our use case.",
+        "2. **Default behavior** — When no `fields` param is provided, return all fields (backwards compatible).",
+      ],
+      targetBranch: "dev",
+      branch: "feature/sparse-fieldsets",
+      progressEntries: [
+        "2026-04-01 10:00: Started planning, defined field selection syntax",
+        "2026-04-02 09:00: Implemented parser for fields param, need to decide on nested resource handling",
+      ],
+    },
+    prompt:
+      "load plan. We need to decide how to handle nested resources — should `fields` apply recursively to nested objects, or should we use dot notation like `fields=user.name,user.email`?",
+    judgeCriteria: [
+      "Did Claude reference the existing decisions (query parameter syntax, default behavior)?",
+      "Did Claude propose adding a new numbered decision (e.g. Decision 3) for nested resource handling?",
+      "Did Claude treat the Decisions section as append-only (not rewriting existing entries)?",
     ],
   },
 ];

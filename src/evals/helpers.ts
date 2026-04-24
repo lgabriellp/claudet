@@ -85,13 +85,23 @@ function buildPlanContent(scenario: EvalScenario): string {
   lines.push(`# ${scenario.name}`);
   lines.push("");
   lines.push("## Context");
-  lines.push(f.context ?? "<!-- Why this change is being made -->");
+  lines.push(f.context ?? "");
   lines.push("");
   lines.push("## Objective");
-  lines.push(f.objective ?? "<!-- What will be done -->");
+  lines.push(f.objective ?? "");
   lines.push("");
-  lines.push("## Ticket");
-  lines.push(f.ticket ?? "CU-abc123");
+  lines.push("## Decisions");
+  if (f.decisions) {
+    for (const d of f.decisions) lines.push(d);
+  }
+  lines.push("");
+  lines.push("## Test Scenarios");
+  lines.push("");
+  lines.push("## Manual Tests");
+  lines.push("");
+  lines.push("## Implementation");
+  lines.push("");
+  lines.push("## Verification");
   lines.push("");
   lines.push("## Target Branch");
   lines.push(f.targetBranch);
@@ -99,22 +109,10 @@ function buildPlanContent(scenario: EvalScenario): string {
   lines.push("## Branch");
   lines.push(f.branch);
   lines.push("");
-  lines.push("## Key Files");
-  lines.push("<!-- Files that will be created/modified -->");
-  lines.push("");
-  lines.push("## Test Scenarios");
-  lines.push("<!-- Test plan grouped by tier -->");
-  lines.push("");
   lines.push("## Status");
   lines.push(f.planStatus);
   lines.push("");
-  lines.push("## Time Tracked");
-  lines.push(f.timeTracked ?? "0h 0m");
-  lines.push("");
   lines.push("## Progress");
-  lines.push(
-    "<!-- Append-only log. Claude and user append entries as work progresses. -->",
-  );
   if (f.progressEntries) {
     for (const entry of f.progressEntries) {
       lines.push(`- ${entry}`);

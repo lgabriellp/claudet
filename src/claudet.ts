@@ -53,6 +53,7 @@ import {
   prStateLabel,
   prBadge,
   generatePlanContent,
+  migratePlanStructure,
   type PRStatus,
   upsertPlanSection,
   getTargetFromPlan,
@@ -450,7 +451,7 @@ function createPlanFile(
     const time = now.toTimeString().slice(0, 5);
     const content = generatePlanContent(
       name,
-      { target: entry.target, ticket: entry.ticket },
+      { target: entry.target },
       date,
       time,
     );
@@ -2004,6 +2005,14 @@ async function interactiveFlow(): Promise<void> {
   const entry = data.worktrees[selectedName];
   const pPath = planFilePath(dataDir, slug, selectedName);
   const selectedWtPath = wtDirPath(dataDir, slug, selectedName);
+
+  // Migrate plan structure (ADR-001: transparent migration)
+  if (existsSync(pPath)) {
+    const planContent = readFileSync(pPath, "utf-8");
+    const migrated = migratePlanStructure(planContent);
+    if (migrated !== planContent) writeFileSync(pPath, migrated);
+  }
+
   const status = getStatusFromPlan(pPath);
   const lastProgress = getLastProgress(pPath);
 

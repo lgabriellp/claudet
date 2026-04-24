@@ -305,42 +305,164 @@ export function prBadge(pr: PRStatus | null, colors: Colors): string {
 }
 
 // ---------------------------------------------------------------------------
+// Plan structure migration
+// ---------------------------------------------------------------------------
+
+const CANONICAL_SECTIONS = [
+  "Context",
+  "Objective",
+  "Decisions",
+  "Test Scenarios",
+  "Manual Tests",
+  "Implementation",
+  "Verification",
+  "Target Branch",
+  "Branch",
+  "PR",
+  "Status",
+  "Progress",
+];
+
+const DEPRECATED_SECTIONS = new Set(["Ticket", "Key Files", "Time Tracked"]);
+
+interface ParsedSection {
+  heading: string;
+  body: string;
+}
+
+function parsePlanSections(content: string): {
+  title: string;
+  sections: ParsedSection[];
+} {
+  const lines = content.split("\n");
+  let title = "";
+
+  // Extract title (first # line)
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line.startsWith("# ") && !line.startsWith("## ")) {
+      title = line;
+      i++;
+      break;
+    }
+    if (line.trim() !== "") break;
+    i++;
+  }
+
+  const sections: ParsedSection[] = [];
+  let currentHeading: string | null = null;
+  let currentBody: string[] = [];
+
+  for (; i < lines.length; i++) {
+    const line = lines[i];
+    const headingMatch = line.match(/^## (.+)$/);
+    if (headingMatch) {
+      if (currentHeading !== null) {
+        sections.push({
+          heading: currentHeading,
+          body: currentBody.join("\n").replace(/^\n+|\n+$/g, ""),
+        });
+      }
+      currentHeading = headingMatch[1].trim();
+      currentBody = [];
+    } else if (currentHeading !== null) {
+      currentBody.push(line);
+    }
+  }
+  if (currentHeading !== null) {
+    sections.push({
+      heading: currentHeading,
+      body: currentBody.join("\n").replace(/^\n+|\n+$/g, ""),
+    });
+  }
+
+  return { title, sections };
+}
+
+export function migratePlanStructure(content: string): string {
+  const { title, sections } = parsePlanSections(content);
+
+  // Build a map of heading -> body, filtering deprecated sections
+  const sectionMap = new Map<string, string>();
+  const unknownSections: ParsedSection[] = [];
+  const canonicalSet = new Set(CANONICAL_SECTIONS);
+
+  for (const s of sections) {
+    if (DEPRECATED_SECTIONS.has(s.heading)) continue;
+    if (canonicalSet.has(s.heading)) {
+      sectionMap.set(s.heading, s.body);
+    } else {
+      unknownSections.push(s);
+    }
+  }
+
+  // Strip HTML comments from bodies of sections that were empty except for comments
+  for (const [key, val] of sectionMap) {
+    const stripped = val.replace(/<!--[\s\S]*?-->/g, "").trim();
+    if (stripped === "") sectionMap.set(key, "");
+  }
+
+  // Reassemble in canonical order
+  const parts: string[] = [];
+  if (title) parts.push(title);
+
+  for (const heading of CANONICAL_SECTIONS) {
+    // Skip optional dynamic sections (Branch, PR) if not present
+    if (
+      !sectionMap.has(heading) &&
+      (heading === "Branch" || heading === "PR")
+    ) {
+      continue;
+    }
+    const body = sectionMap.get(heading) ?? "";
+    parts.push(`\n## ${heading}\n${body ? body + "\n" : ""}`);
+  }
+
+  // Append unknown sections at the end
+  for (const s of unknownSections) {
+    parts.push(`\n## ${s.heading}\n${s.body ? s.body + "\n" : ""}`);
+  }
+
+  return parts
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/\n+$/, "\n");
+}
+
+// ---------------------------------------------------------------------------
 // Plan content generation
 // ---------------------------------------------------------------------------
 
 export function generatePlanContent(
   name: string,
-  opts: { target?: string; ticket?: string },
+  opts: { target?: string },
   date: string,
   time: string,
 ): string {
-  const ticketSection = opts.ticket ? `\n## Ticket\n${opts.ticket}\n` : "";
   return `# ${name}
 
 ## Context
-<!-- Why this change is being made -->
 
 ## Objective
-<!-- What will be done -->
-${ticketSection}
-## Target Branch
-${opts.target || "dev"}
 
-## Key Files
-<!-- Files that will be created/modified -->
+## Decisions
 
 ## Test Scenarios
-<!-- Test plan grouped by tier -->
+
+## Manual Tests
+
+## Implementation
+
+## Verification
+
+## Target Branch
+${opts.target || "dev"}
 
 ## Status
 pending
 
-## Time Tracked
-0m
-
 ## Progress
-<!-- Append-only log. Claude and user append entries as work progresses. -->
-<!-- ALL change requests must be logged here, even when requested outside Claude plan mode. -->
 - ${date} ${time}: Created worktree, started planning
 `;
 }

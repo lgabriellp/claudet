@@ -53,6 +53,7 @@ import {
   prStateLabel,
   prBadge,
   generatePlanContent,
+  migratePlanStructure,
   matchesSearch,
   sortBranchesDefaultFirst,
   type PRStatus,
@@ -1433,9 +1434,6 @@ describe("upsertPlanSection", () => {
     "## Target Branch",
     "dev",
     "",
-    "## Key Files",
-    "- src/foo.ts",
-    "",
     "## Status",
     "pending",
     "",
@@ -1452,12 +1450,12 @@ describe("upsertPlanSection", () => {
       "Target Branch",
     );
     expect(result).toContain("## Branch\nfeature/my-branch\n");
-    // Should appear between Target Branch and Key Files
+    // Should appear between Target Branch and Status
     const branchIdx = result.indexOf("## Branch");
     const targetIdx = result.indexOf("## Target Branch");
-    const keyFilesIdx = result.indexOf("## Key Files");
+    const statusIdx = result.indexOf("## Status");
     expect(branchIdx).toBeGreaterThan(targetIdx);
-    expect(branchIdx).toBeLessThan(keyFilesIdx);
+    expect(branchIdx).toBeLessThan(statusIdx);
   });
 
   it("updates an existing section", () => {
@@ -1496,7 +1494,6 @@ describe("upsertPlanSection", () => {
     expect(removed).not.toContain("## Branch");
     // Other sections remain
     expect(removed).toContain("## Target Branch");
-    expect(removed).toContain("## Key Files");
     expect(removed).toContain("## Status");
   });
 
@@ -1962,6 +1959,258 @@ describe("prBadge", () => {
 });
 
 // ---------------------------------------------------------------------------
+// migratePlanStructure
+// ---------------------------------------------------------------------------
+
+describe("migratePlanStructure", () => {
+  it("migrates old-format plan to new section order", () => {
+    const oldPlan = [
+      "# My Feature",
+      "",
+      "## Context",
+      "Some context",
+      "",
+      "## Objective",
+      "Some objective",
+      "",
+      "## Ticket",
+      "PROJ-123",
+      "",
+      "## Target Branch",
+      "dev",
+      "",
+      "## Key Files",
+      "- src/foo.ts",
+      "",
+      "## Test Scenarios",
+      "Test 1: something",
+      "",
+      "## Status",
+      "in-progress",
+      "",
+      "## Time Tracked",
+      "2h 30m",
+      "",
+      "## Progress",
+      "- 2026-04-01: Started",
+    ].join("\n");
+
+    const result = migratePlanStructure(oldPlan);
+    const sections = [...result.matchAll(/^## (.+)$/gm)].map((m) => m[1]);
+
+    // Deprecated sections removed
+    expect(sections).not.toContain("Ticket");
+    expect(sections).not.toContain("Key Files");
+    expect(sections).not.toContain("Time Tracked");
+
+    // Missing sections added
+    expect(sections).toContain("Decisions");
+    expect(sections).toContain("Manual Tests");
+    expect(sections).toContain("Implementation");
+    expect(sections).toContain("Verification");
+
+    // Canonical order
+    expect(sections.indexOf("Context")).toBeLessThan(
+      sections.indexOf("Objective"),
+    );
+    expect(sections.indexOf("Objective")).toBeLessThan(
+      sections.indexOf("Decisions"),
+    );
+    expect(sections.indexOf("Decisions")).toBeLessThan(
+      sections.indexOf("Test Scenarios"),
+    );
+    expect(sections.indexOf("Test Scenarios")).toBeLessThan(
+      sections.indexOf("Manual Tests"),
+    );
+    expect(sections.indexOf("Manual Tests")).toBeLessThan(
+      sections.indexOf("Implementation"),
+    );
+    expect(sections.indexOf("Implementation")).toBeLessThan(
+      sections.indexOf("Verification"),
+    );
+    expect(sections.indexOf("Verification")).toBeLessThan(
+      sections.indexOf("Target Branch"),
+    );
+    expect(sections.indexOf("Target Branch")).toBeLessThan(
+      sections.indexOf("Status"),
+    );
+    expect(sections.indexOf("Status")).toBeLessThan(
+      sections.indexOf("Progress"),
+    );
+  });
+
+  it("preserves section content during reorder", () => {
+    const plan = [
+      "# Feature X",
+      "",
+      "## Context",
+      "Why we need this",
+      "",
+      "## Status",
+      "in-progress",
+      "",
+      "## Objective",
+      "What we'll do",
+      "",
+      "## Test Scenarios",
+      "Test 1: check it works",
+      "  Arrange: setup",
+      "  Act: do thing",
+      "  Assert: result",
+      "",
+      "## Progress",
+      "- 2026-04-01: Started",
+      "- 2026-04-02: Continued",
+    ].join("\n");
+
+    const result = migratePlanStructure(plan);
+
+    expect(result).toContain("Why we need this");
+    expect(result).toContain("What we'll do");
+    expect(result).toContain("Test 1: check it works");
+    expect(result).toContain("  Arrange: setup");
+    expect(result).toContain("- 2026-04-01: Started");
+    expect(result).toContain("- 2026-04-02: Continued");
+  });
+
+  it("removes deprecated sections", () => {
+    const plan = [
+      "# Plan",
+      "",
+      "## Context",
+      "ctx",
+      "",
+      "## Objective",
+      "obj",
+      "",
+      "## Ticket",
+      "JIRA-456",
+      "",
+      "## Key Files",
+      "- src/a.ts",
+      "- src/b.ts",
+      "",
+      "## Time Tracked",
+      "5h 10m",
+      "",
+      "## Status",
+      "pending",
+      "",
+      "## Progress",
+      "- start",
+    ].join("\n");
+
+    const result = migratePlanStructure(plan);
+    expect(result).not.toContain("JIRA-456");
+    expect(result).not.toContain("Key Files");
+    expect(result).not.toContain("5h 10m");
+    expect(result).not.toContain("Time Tracked");
+  });
+
+  it("adds missing required sections", () => {
+    const plan = [
+      "# Minimal",
+      "",
+      "## Context",
+      "ctx",
+      "",
+      "## Objective",
+      "obj",
+      "",
+      "## Status",
+      "pending",
+      "",
+      "## Progress",
+      "- start",
+    ].join("\n");
+
+    const result = migratePlanStructure(plan);
+    const sections = [...result.matchAll(/^## (.+)$/gm)].map((m) => m[1]);
+
+    expect(sections).toContain("Decisions");
+    expect(sections).toContain("Test Scenarios");
+    expect(sections).toContain("Manual Tests");
+    expect(sections).toContain("Implementation");
+    expect(sections).toContain("Verification");
+    expect(sections).toContain("Target Branch");
+  });
+
+  it("is idempotent on already-migrated plan", () => {
+    const plan = generatePlanContent(
+      "my-plan",
+      { target: "main" },
+      "2026-04-01",
+      "10:00",
+    );
+    const first = migratePlanStructure(plan);
+    const second = migratePlanStructure(first);
+    expect(second).toBe(first);
+  });
+
+  it("preserves title line", () => {
+    const plan = [
+      "# My Awesome Feature Plan",
+      "",
+      "## Context",
+      "ctx",
+      "",
+      "## Status",
+      "pending",
+      "",
+      "## Progress",
+      "- start",
+    ].join("\n");
+
+    const result = migratePlanStructure(plan);
+    expect(result.startsWith("# My Awesome Feature Plan")).toBe(true);
+  });
+
+  it("preserves dynamic sections (Branch, PR)", () => {
+    const plan = [
+      "# Plan",
+      "",
+      "## Context",
+      "ctx",
+      "",
+      "## Objective",
+      "obj",
+      "",
+      "## Target Branch",
+      "dev",
+      "",
+      "## Branch",
+      "feat/my-feature",
+      "",
+      "## PR",
+      "- **Number:** #42",
+      "- **State:** OPEN",
+      "- **URL:** https://github.com/org/repo/pull/42",
+      "",
+      "## Status",
+      "in-progress",
+      "",
+      "## Progress",
+      "- start",
+    ].join("\n");
+
+    const result = migratePlanStructure(plan);
+    const sections = [...result.matchAll(/^## (.+)$/gm)].map((m) => m[1]);
+
+    expect(sections).toContain("Branch");
+    expect(sections).toContain("PR");
+    expect(result).toContain("feat/my-feature");
+    expect(result).toContain("- **Number:** #42");
+
+    // Branch and PR should be after Target Branch, before Status
+    expect(sections.indexOf("Target Branch")).toBeLessThan(
+      sections.indexOf("Branch"),
+    );
+    expect(sections.indexOf("Branch")).toBeLessThan(sections.indexOf("PR"));
+    expect(sections.indexOf("PR")).toBeLessThan(sections.indexOf("Status"));
+  });
+});
+
+// ---------------------------------------------------------------------------
 // generatePlanContent
 // ---------------------------------------------------------------------------
 
@@ -1972,28 +2221,15 @@ describe("generatePlanContent", () => {
     expect(sections).toEqual([
       "Context",
       "Objective",
-      "Target Branch",
-      "Key Files",
+      "Decisions",
       "Test Scenarios",
+      "Manual Tests",
+      "Implementation",
+      "Verification",
+      "Target Branch",
       "Status",
-      "Time Tracked",
       "Progress",
     ]);
-  });
-
-  it("includes Ticket section when provided", () => {
-    const content = generatePlanContent(
-      "my-plan",
-      { ticket: "PROJ-123" },
-      "2026-03-27",
-      "10:00",
-    );
-    expect(content).toContain("## Ticket\nPROJ-123");
-  });
-
-  it("omits Ticket section when absent", () => {
-    const content = generatePlanContent("my-plan", {}, "2026-03-27", "10:00");
-    expect(content).not.toContain("## Ticket");
   });
 
   it("uses provided target; defaults to dev when absent", () => {
