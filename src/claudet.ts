@@ -242,12 +242,15 @@ function worklogPath(dataDir: string): string {
 // Types
 // ---------------------------------------------------------------------------
 
+type AgentKind = "claude" | "codex" | "shell";
+
 interface WorktreeEntry {
   branch: string;
   target: string;
   archivedAt: string | null;
   lastAccessedAt?: string;
   lastSessionId?: string;
+  lastAgent?: AgentKind;
 }
 
 interface WorktreesData {
@@ -403,6 +406,36 @@ function touchLastAccessed(
       saveWorktrees(dataDir, slug, data);
     }
   }
+}
+
+function setLastAgent(
+  dataDir: string,
+  slug: string,
+  worktreeName: string,
+  agent: AgentKind,
+): void {
+  const data = loadWorktrees(dataDir, slug);
+  if (data.worktrees[worktreeName]) {
+    data.worktrees[worktreeName].lastAgent = agent;
+    saveWorktrees(dataDir, slug, data);
+  }
+}
+
+interface AgentAvailability {
+  claude: boolean;
+  codex: boolean;
+}
+
+function detectAgents(): AgentAvailability {
+  const has = (cmd: string): boolean => {
+    try {
+      execFileSync("which", [cmd], { stdio: "pipe" });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  return { claude: has("claude"), codex: has("codex") };
 }
 
 // ---------------------------------------------------------------------------
@@ -1536,6 +1569,35 @@ function launchClaude(
   });
 }
 
+function launchCodex(cwd: string, ctx?: SessionContext): void {
+  p.outro(pc.dim(`Launching codex in ${cwd}`));
+  const args: string[] = [];
+  if (ctx?.planPath) {
+    const verb =
+      ctx.status === "pending"
+        ? "start planning"
+        : "continue from last progress entry";
+    args.push(`Read the plan at ${ctx.planPath} and ${verb}.`);
+  }
+  const child = spawn("codex", args, {
+    cwd,
+    stdio: "inherit",
+    env: process.env,
+  });
+  child.on("exit", (code) => process.exit(code ?? 0));
+}
+
+function launchShell(cwd: string): void {
+  p.outro(pc.dim(`Opening shell in ${cwd}`));
+  const shell = process.env.SHELL ?? "/bin/bash";
+  const child = spawn(shell, [], {
+    cwd,
+    stdio: "inherit",
+    env: process.env,
+  });
+  child.on("exit", (code) => process.exit(code ?? 0));
+}
+
 // ---------------------------------------------------------------------------
 // Worktree creation
 // ---------------------------------------------------------------------------
@@ -2040,7 +2102,7 @@ async function interactiveFlow(): Promise<void> {
   if (isWorktreeRunning(selectedWtPath)) {
     const proceed = await p.confirm({
       message:
-        "A Claude session appears to be running in this worktree. Launch anyway?",
+        "A session appears to be running in this worktree. Launch anyway?",
       initialValue: false,
     });
     if (cancelled(proceed) || !proceed) bail("Cancelled.");
@@ -2048,7 +2110,11 @@ async function interactiveFlow(): Promise<void> {
 
   await ensureClaudetGitignore(repoRoot);
   touchLastAccessed(dataDir, slug, selectedName);
-  launchClaude(selectedWtPath, projectConfig, {
+
+  const agent = await pickAgent(entry.lastAgent);
+  setLastAgent(dataDir, slug, selectedName, agent);
+
+  const ctx: SessionContext = {
     planPath: pPath,
     branch: entry.branch,
     target: entry.target,
@@ -2057,7 +2123,35 @@ async function interactiveFlow(): Promise<void> {
     pr,
     behindRemote,
     lastSessionId: entry.lastSessionId,
+  };
+
+  if (agent === "claude") {
+    launchClaude(selectedWtPath, projectConfig, ctx);
+  } else if (agent === "codex") {
+    launchCodex(selectedWtPath, ctx);
+  } else {
+    launchShell(selectedWtPath);
+  }
+}
+
+async function pickAgent(preferred?: AgentKind): Promise<AgentKind> {
+  const avail = detectAgents();
+  const options: { value: AgentKind; label: string; hint?: string }[] = [];
+  if (avail.claude) options.push({ value: "claude", label: "Claude Code" });
+  if (avail.codex) options.push({ value: "codex", label: "Codex" });
+  options.push({ value: "shell", label: "Shell", hint: "manual work" });
+
+  if (options.length === 1) return options[0].value;
+
+  const initial =
+    options.find((o) => o.value === preferred)?.value ?? options[0].value;
+  const selection = await p.select({
+    message: "Launch with",
+    options,
+    initialValue: initial,
   });
+  if (cancelled(selection)) bail("Cancelled.");
+  return selection as AgentKind;
 }
 
 // ---------------------------------------------------------------------------
