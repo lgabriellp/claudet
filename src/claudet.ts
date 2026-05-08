@@ -1569,17 +1569,9 @@ function launchClaude(
   });
 }
 
-function launchCodex(cwd: string, ctx?: SessionContext): void {
+function launchCodex(cwd: string): void {
   p.outro(pc.dim(`Launching codex in ${cwd}`));
-  const args: string[] = [];
-  if (ctx?.planPath) {
-    const verb =
-      ctx.status === "pending"
-        ? "start planning"
-        : "continue from last progress entry";
-    args.push(`Read the plan at ${ctx.planPath} and ${verb}.`);
-  }
-  const child = spawn("codex", args, {
+  const child = spawn("codex", [], {
     cwd,
     stdio: "inherit",
     env: process.env,
@@ -2128,7 +2120,7 @@ async function interactiveFlow(): Promise<void> {
   if (agent === "claude") {
     launchClaude(selectedWtPath, projectConfig, ctx);
   } else if (agent === "codex") {
-    launchCodex(selectedWtPath, ctx);
+    launchCodex(selectedWtPath);
   } else {
     launchShell(selectedWtPath);
   }
