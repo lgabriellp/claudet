@@ -601,6 +601,26 @@ async function branchExists(branch: string, cwd: string): Promise<boolean> {
   }
 }
 
+function originBranchRef(branch: string): string {
+  return branch.startsWith("origin/") ? branch : `origin/${branch}`;
+}
+
+function originFetchBranch(branch: string): string {
+  return branch.startsWith("origin/") ? branch.slice("origin/".length) : branch;
+}
+
+async function remoteBranchExists(
+  branch: string,
+  cwd: string,
+): Promise<boolean> {
+  try {
+    await git(cwd).revparse(["--verify", originBranchRef(branch)]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function discoverRepoRoot(cwd: string): Promise<string> {
   const output = await git(cwd).raw("worktree", "list", "--porcelain");
   const firstLine = output.split("\n")[0];
@@ -1674,21 +1694,21 @@ async function createWorktree(
       // No upstream
     }
   } else {
-    if (!(await branchExists(target, repoRoot))) {
-      try {
-        await g.fetch("origin", target);
-      } catch {
-        fail(`Base branch "${target}" does not exist locally or on origin.`);
-      }
-      if (!(await branchExists(`origin/${target}`, repoRoot))) {
-        fail(`Base branch "${target}" does not exist.`);
-      }
+    const remoteTarget = originBranchRef(target);
+
+    try {
+      await g.fetch("origin", originFetchBranch(target));
+    } catch {
+      fail(`Base branch "${target}" does not exist on origin.`);
+    }
+    if (!(await remoteBranchExists(target, repoRoot))) {
+      fail(`Base branch "${target}" does not exist on origin.`);
     }
 
     s?.start(
-      `Creating worktree ${pc.bold(shortName)} from ${pc.cyan(target)}...`,
+      `Creating worktree ${pc.bold(shortName)} from ${pc.cyan(remoteTarget)}...`,
     );
-    await g.raw("worktree", "add", "-b", branch, wtPath, target);
+    await g.raw("worktree", "add", "-b", branch, wtPath, remoteTarget);
     s?.stop(`Created worktree ${pc.bold(shortName)}.`);
   }
 
